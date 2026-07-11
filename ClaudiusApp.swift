@@ -485,7 +485,7 @@ final class UsageModel: ObservableObject {
            let status = obj["status"] as? String {
             let msg = obj["message"] as? String ?? status
             switch status {
-            case "sent": return (.sent, "5h limit renewed")
+            case "sent": return (.sent, "5h limit refreshed")
             case "skipped": return (.skipped, msg)
             default: return (.failed, msg)   // "error" — network/probe/usage failure
             }
@@ -687,7 +687,7 @@ struct PopoverView: View {
                 Toggle(isOn: Binding(
                     get: { model.autoAnchor },
                     set: { model.autoAnchor = $0 })) {
-                        Text("Auto-renew 5h limit").font(.caption)
+                        Text("Auto-refresh 5h limit").font(.caption)
                     }
                     .toggleStyle(.switch)
                     .controlSize(.mini)

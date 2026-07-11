@@ -841,7 +841,7 @@ def run_anchor(force, json_out):
     ok, message = run_claude_probe()
     if not ok:
         done("error", message, 5)
-    done("sent", "5h limit renewed via tiny cheapest-model request", 0)
+    done("sent", "5h limit refreshed via tiny cheapest-model request", 0)
 
 
 def run_notify(raw, token_status, state, threshold):
