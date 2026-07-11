@@ -16,17 +16,6 @@ Claudius is a lightweight, open-source **macOS menu bar app** for [Claude Code](
 - **Optional cache keep-alive.** Keep a long conversation's prompt cache warm so resuming stays fast — and it *refuses to warm a dead cache*, so it never wastes usage on a session that's already cold.
 - **100% local & private.** Reads the token from your macOS **Keychain** and transcripts from `~/.claude`. Nothing leaves your machine except the call to Anthropic's own usage endpoint.
 
-## How do I check my Claude Code usage without opening a dashboard?
-
-Claudius surfaces the same numbers as the in-app `/usage` command, but always-on in your menu bar. Two circles show **% left** for the session (5h) and weekly windows; click for full bars, reset times, and a one-tap refresh. If you prefer the terminal, the bundled `claude-usage` CLI prints the same data:
-
-```sh
-claude-usage            # live view of session / weekly / model limits
-claude-usage check      # prints true/false — are you rate-limited right now?
-claude-usage sessions   # recent sessions + cache warmth
-claude-usage cost --since 1d   # which sessions consumed the most today
-```
-
 ## Features
 
 | | |
@@ -66,9 +55,19 @@ The macOS app (SwiftUI, `MenuBarExtra`) shells out to a small Python backend, `c
 
 Because the token lives only in the Keychain and the app runs the `claude` CLI for keep-alive, it **can't be sandboxed** for the Mac App Store — distribute a notarized build instead.
 
-## Similar tools
+<details>
+<summary><strong>How do I check my Claude Code usage without opening a dashboard?</strong></summary>
 
-Claudius sits alongside other free, open-source usage trackers — [CodexBar](https://github.com/steipete/CodexBar), [ccusage](https://github.com/ryoppippi/ccusage), and [Claude-Code-Usage-Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor). Claudius leans on the native menu-bar gauges plus the per-session consumption and cache view.
+Claudius surfaces the same numbers as the in-app `/usage` command, but always-on in your menu bar. Two circles show **% left** for the session (5h) and weekly windows; click for full bars, reset times, and a one-tap refresh. If you prefer the terminal, the bundled `claude-usage` CLI prints the same data:
+
+```sh
+claude-usage            # live view of session / weekly / model limits
+claude-usage check      # prints true/false — are you rate-limited right now?
+claude-usage sessions   # recent sessions + cache warmth
+claude-usage cost --since 1d   # which sessions consumed the most today
+```
+
+</details>
 
 ## Keywords
 
