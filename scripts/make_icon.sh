@@ -2,6 +2,7 @@
 # Render the icon and package it as AppIcon.icns in the project dir.
 set -euo pipefail
 DIR="${0:A:h}"
+PROJECT="${DIR:h}"   # scripts/ lives one level under the project root
 WORK="$DIR/.iconbuild"
 rm -rf "$WORK"; mkdir -p "$WORK"
 
@@ -21,6 +22,6 @@ gen 512  icon_256x256@2x.png
 gen 512  icon_512x512.png
 gen 1024 icon_512x512@2x.png
 
-iconutil -c icns "$ICONSET" -o "$DIR/AppIcon.icns"
+iconutil -c icns "$ICONSET" -o "$PROJECT/AppIcon.icns"
 rm -rf "$WORK"
-echo "wrote $DIR/AppIcon.icns"
+echo "wrote $PROJECT/AppIcon.icns"

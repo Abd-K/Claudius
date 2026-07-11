@@ -52,7 +52,7 @@ final class SessionsModel: ObservableObject {
     private var costsLoading = false
 
     private var timer: Timer?
-    private let staleAfter = 3300  // 55 min — fire before the 1-hour cache lapses
+    private static let staleAfter = 3300  // 55 min — fire before the 1-hour cache lapses
     private static let cliPath = NSHomeDirectory() + "/.local/bin/claude-usage"
 
     init() {
@@ -82,7 +82,7 @@ final class SessionsModel: ObservableObject {
         // Only extend sessions that are still warm and near expiry. Never warm a
         // cold one — the CLI refuses it too, but don't even spawn the attempt.
         for s in sessions where keepAliveIDs.contains(s.session_id)
-            && s.isWarm && s.currentAge >= Double(staleAfter) {
+            && s.isWarm && s.currentAge >= Double(Self.staleAfter) {
             sendKeepAlive(s.session_id, manual: false)
             break  // one at a time; the next tick catches the rest
         }
@@ -154,7 +154,7 @@ final class SessionsModel: ObservableObject {
     }
 
     private static func runKeepAlive(_ id: String, force: Bool) -> (String, String) {
-        let stale = force ? "0" : "3300"
+        let stale = force ? "0" : String(staleAfter)
         guard let data = runCLI(["keepalive", "--session-id", id, "--stale-after", stale, "--json"],
                                 timeout: 200) else {
             return ("error", "couldn't run claude-usage")

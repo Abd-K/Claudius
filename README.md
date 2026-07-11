@@ -30,9 +30,9 @@ Claudius is a lightweight, open-source **macOS menu bar app** for [Claude Code](
 
 ## What everything means
 
-**In the menu bar** — two coloured circles, and sometimes a small arrow:
+**In the menu bar** — two coloured badges, and sometimes a small arrow:
 
-- **Left circle = your 5-hour limit, right circle = your weekly limit.** The number is how much you have **left**; the colour runs green → yellow → orange → red as it gets low.
+- **Left badge (circle) = your 5-hour limit, right badge (rounded square) = your weekly limit.** The number is how much you have **left**; the colour runs green → yellow → orange → red as it gets low.
 - **The arrow** shows only when your weekly pace is off: **↑** you're burning through it fast, **↓** you're well under. No arrow means you're on track.
 
 **Click the icon** to open the panel:
@@ -48,6 +48,7 @@ Requires macOS 13+, the Xcode command-line tools (`swiftc`), `python3`, and an a
 
 ```sh
 # 1. Backend CLI
+mkdir -p ~/.local/bin
 install -m 0755 claude-usage ~/.local/bin/claude-usage
 
 # 2. The app  → /Applications/Claudius.app
@@ -72,7 +73,7 @@ Because the token lives only in the Keychain and the app runs the `claude` CLI f
 <details>
 <summary><strong>How do I check my Claude Code usage without opening a dashboard?</strong></summary>
 
-Claudius surfaces the same numbers as the in-app `/usage` command, but always-on in your menu bar. Two circles show **% left** for the session (5h) and weekly windows; click for full bars, reset times, and a one-tap refresh. If you prefer the terminal, the bundled `claude-usage` CLI prints the same data:
+Claudius surfaces the same numbers as the in-app `/usage` command, but always-on in your menu bar. Two badges show **% left** for the session (5h) and weekly windows; click for full bars, reset times, and a one-tap refresh. If you prefer the terminal, the bundled `claude-usage` CLI prints the same data:
 
 ```sh
 claude-usage            # live view of session / weekly / model limits
