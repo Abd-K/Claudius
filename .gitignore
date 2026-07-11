@@ -1,0 +1,5 @@
+.DS_Store
+.iconbuild/
+__pycache__/
+*.pyc
+*.app/
