@@ -5,7 +5,6 @@ import ServiceManagement
 // MARK: - Data
 
 struct CLIOutput: Decodable {
-    let available: Bool
     let token_status: String
     let windows: [CLIWindow]
 }
@@ -17,18 +16,6 @@ struct CLIWindow: Decodable {
     let resets_in_seconds: Int?
     let blocked: Bool
 }
-
-/// Severity of being off a healthy burn rate. Higher wins when combining windows.
-enum PaceLevel: Int, Comparable {
-    case ok = 0       // green
-    case mild = 1     // yellow
-    case warn = 2     // orange
-    case high = 3     // red
-    static func < (a: PaceLevel, b: PaceLevel) -> Bool { a.rawValue < b.rawValue }
-}
-
-/// Which way you're off pace — drives the direction arrow on each bar.
-enum PaceDirection { case onTrack, tooSlow, tooFast }
 
 struct UsageWindow: Identifiable {
     let name: String
@@ -45,54 +32,6 @@ struct UsageWindow: Identifiable {
     var elapsedFraction: Double {
         guard let reset = resetDate else { return 1 }
         return max(0.02, min(1, 1 - reset.timeIntervalSinceNow / duration))
-    }
-
-    /// Projected final usage if the current average rate holds to the reset.
-    /// 1.0 = on track to use it all exactly; >1 = you'll hit the cap early.
-    var projectedFinal: Double? {
-        guard resetDate != nil else { return nil }
-        return (percent ?? 0) / 100 / elapsedFraction
-    }
-
-    /// How much quota you're projected to waste, weighted by how locked-in it is
-    /// (near the reset). 0 when on track or over-pacing.
-    private var wasteSeverity: Double {
-        guard let p = projectedFinal, p < 1 else { return 0 }
-        return (1 - p) * elapsedFraction
-    }
-
-    var direction: PaceDirection {
-        if blocked { return .tooFast }
-        guard let p = projectedFinal else { return .onTrack }
-        if p >= 1.10 { return .tooFast }
-        if wasteSeverity >= 0.10 { return .tooSlow }
-        return .onTrack
-    }
-
-    /// PRIMARY color: mostly driven by burning too SLOW (wasting quota). Burning
-    /// too fast only escalates color once you're genuinely about to run out —
-    /// otherwise it shows as a minor ↑ arrow, not a hot color.
-    var level: PaceLevel {
-        if blocked { return .high }
-        if wasteSeverity >= 0.33 { return .high }
-        if wasteSeverity >= 0.20 { return .warn }
-        if wasteSeverity >= 0.10 { return .mild }
-        if let p = projectedFinal {
-            if p >= 1.5 { return .warn }
-            if p >= 1.10 { return .mild }
-        }
-        return .ok
-    }
-
-    var burningFast: Bool { direction == .tooFast }
-
-    var color: Color {
-        switch level {
-        case .high: return .red
-        case .warn: return .orange
-        case .mild: return .yellow
-        case .ok: return .green
-        }
     }
 
     /// Urgency (0 green · 1 yellow · 2 orange · 3 red): starts from how much is
@@ -120,15 +59,6 @@ struct UsageWindow: Identifiable {
         case 1: return .yellow
         case 2: return .orange
         default: return .red
-        }
-    }
-
-    /// Small direction glyph for the bar / menu. nil when on track.
-    var arrow: String? {
-        switch direction {
-        case .tooFast: return "↑"
-        case .tooSlow: return "↓"
-        case .onTrack: return nil
         }
     }
 
@@ -175,7 +105,6 @@ enum AnchorOutcome { case sent, skipped, failed }
 
 final class UsageModel: ObservableObject {
     @Published var windows: [UsageWindow] = []
-    @Published var available: Bool?
     @Published var error: String?
     @Published var updatedAt: Date?
     @Published var isFetching = false
@@ -223,34 +152,6 @@ final class UsageModel: ObservableObject {
     private func handleWake() {
         fetch()
         if autoAnchor && openSessionWindow == nil { maybeAutoAnchor() }
-    }
-
-    /// The window driving the menu-bar signal — the most off-pace one.
-    var menuWindow: UsageWindow? {
-        windows.max(by: { $0.level < $1.level })
-    }
-
-    /// A colored dot guarantees a visible signal (menu-bar SF Symbols often render
-    /// monochrome). 🟢 on track · 🟡 mild · 🟠 off pace · 🔴 far off.
-    var menuEmoji: String {
-        guard let w = menuWindow else { return error == nil ? "⚪️" : "❔" }
-        switch w.level {
-        case .high: return "🔴"
-        case .warn: return "🟠"
-        case .mild: return "🟡"
-        case .ok: return "🟢"
-        }
-    }
-
-    /// Direction arrow for the menu bar — same glyph shown on the driving window's
-    /// bar. ↑ burning too fast · ↓ burning too slow · "" on track.
-    var menuArrow: String { menuWindow?.arrow ?? "" }
-
-    /// Least "% left" across windows — the binding constraint. Stays visible even
-    /// when the latest fetch failed, so a transient error no longer blanks the bar.
-    var menuPercentText: String {
-        guard let minLeft = windows.compactMap({ $0.left }).min() else { return "–" }
-        return "\(Int(minLeft.rounded()))%"
     }
 
     // --- Menu bar icon: session circle + weekly circle + weekly-pace arrow ---
@@ -365,7 +266,6 @@ final class UsageModel: ObservableObject {
                             resetDate: $0.resets_in_seconds.map { now.addingTimeInterval(Double($0)) },
                             blocked: $0.blocked)
                     }
-                    self.available = out.available
                     self.updatedAt = now
                     self.error = nil
                     self.scheduleAutoAnchor()

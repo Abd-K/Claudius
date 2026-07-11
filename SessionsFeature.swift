@@ -9,14 +9,13 @@ struct CacheSession: Identifiable, Decodable {
     let age_seconds: Int
     let name: String?
     let project: String?
-    let branch: String?
     var scannedAt = Date()
 
     var id: String { session_id }
     /// The title Claude Code shows (custom /rename or derived), falling back to
     /// the project folder.
     var title: String { name ?? project ?? "session" }
-    private enum CodingKeys: String, CodingKey { case session_id, age_seconds, name, project, branch }
+    private enum CodingKeys: String, CodingKey { case session_id, age_seconds, name, project }
 
     /// Seconds since last activity, advanced live between scans.
     var currentAge: TimeInterval { Double(age_seconds) + Date().timeIntervalSince(scannedAt) }
@@ -35,7 +34,6 @@ struct CostSession: Identifiable, Decodable {
     let session_id: String
     let name: String?
     let cost_usd: Double
-    let output_tokens: Int
     var id: String { session_id }
     var title: String { name ?? String(session_id.prefix(8)) }
 }
