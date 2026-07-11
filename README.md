@@ -47,6 +47,12 @@ Claudius is a lightweight, open-source **macOS menu bar app** for [Claude Code](
 - **Show consumption** — which chats have used the most of your allowance, over the last **5h / day / week / all time**.
 - **Auto-refresh 5h limit** — when on, it starts a fresh 5-hour limit the moment your current one resets, so you're not left waiting on it.
 
+<p align="center">
+  <img src="docs/consumption.png" width="300"
+       alt="Claudius consumption panel: recent Claude Code sessions ranked by model-weighted share of usage, filterable by 5h / 1d / 1w / all.">
+  <br><em>Show consumption — sessions ranked by share of your usage, filterable by 5h / day / week / all.</em>
+</p>
+
 ## Install
 
 Requires macOS 13+, the Xcode command-line tools (`swiftc`), `python3`, and an authenticated Claude Code CLI (that's where the Keychain token comes from).
