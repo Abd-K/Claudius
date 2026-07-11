@@ -2,6 +2,11 @@
 
 **See how much of your Claude Code plan is left — the 5-hour session window and the weekly limit — at a glance, without opening a dashboard or running `/usage`.**
 
+<p align="center">
+  <img src="docs/popover.png" width="320"
+       alt="Claudius menu-bar popover: session, weekly and Fable usage bars with reset countdowns, a pace arrow, and a per-session cache-warmth list.">
+</p>
+
 Claudius is a lightweight, open-source **macOS menu bar app** for [Claude Code](https://claude.com/claude-code) power users on **Pro and Max plans**. It shows your remaining **session and weekly usage** as two colour-coded gauges, warns you when you're burning through your **rate limit** too fast, and breaks down which of your sessions consumed the most — all read locally from the OAuth token Claude Code already stores and your local session transcripts. No login, no account, no telemetry.
 
 > ⚠️ Unofficial and not affiliated with Anthropic. It reads an **undocumented** usage endpoint via the token Claude Code keeps in your Keychain, so it can break without notice. Personal tool, shared as-is.
