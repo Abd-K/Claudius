@@ -1,41 +1,47 @@
-# Claudius
+# Claudius — Claude Code usage limits in your macOS menu bar
 
-*Claude Code usage at a glance.*
+**See how much of your Claude Code plan is left — the 5-hour session window and the weekly limit — at a glance, without opening a dashboard or running `/usage`.**
 
-A macOS menu bar app that shows how much of your Claude Code subscription limits
-you have left — the 5-hour session window and the weekly window — plus per-session
-cache warmth and consumption. No dashboards, no logins: it reads the same data
-`/usage` shows and your local session transcripts.
+Claudius is a lightweight, open-source **macOS menu bar app** for [Claude Code](https://claude.com/claude-code) power users on **Pro and Max plans**. It shows your remaining **session and weekly usage** as two colour-coded gauges, warns you when you're burning through your **rate limit** too fast, and breaks down which of your sessions consumed the most — all read locally from the OAuth token Claude Code already stores and your local session transcripts. No login, no account, no telemetry.
 
-> Personal tool. It talks to an **undocumented** Anthropic usage endpoint using the
-> OAuth token Claude Code already stores in your Keychain, so it can break without
-> notice. Not affiliated with Anthropic.
+> ⚠️ Unofficial and not affiliated with Anthropic. It reads an **undocumented** usage endpoint via the token Claude Code keeps in your Keychain, so it can break without notice. Personal tool, shared as-is.
 
-## What it shows
+---
 
-- **Two menu-bar circles** — session (5h) and weekly — coloured by how much is left,
-  with a pace arrow on the weekly (↑ burning fast, ↓ behind, hidden when on-track).
-- **Popover** — full bars with reset countdowns, an available/limited badge, and a
-  one-tap refresh.
-- **Sessions** — recent Claude Code sessions with cache warmth (measured from the
-  last real reply, not a file touch), an optional keep-alive that only ever extends
-  a *live* cache, and a collapsible **consumption** view ranking sessions by share
-  of usage over 5h / 1d / 1w / all-time.
+## Why Claudius?
 
-## Parts
+- **Never get surprised by a rate limit again.** Two menu-bar gauges show remaining % for your **5-hour session** and **weekly** windows, each with a live reset countdown.
+- **Know if you're on pace.** A subtle arrow flags when your weekly burn is running ahead of — or behind — a healthy rate, so you can ease off *before* you hit the wall, not after.
+- **See what's eating your quota.** A per-session consumption breakdown over the **last 5h / day / week / all-time** ranks which Claude Code sessions used the most, **model-weighted** so Opus, Sonnet, Haiku and Fable compare fairly.
+- **Optional cache keep-alive.** Keep a long conversation's prompt cache warm so resuming stays fast — and it *refuses to warm a dead cache*, so it never wastes usage on a session that's already cold.
+- **100% local & private.** Reads the token from your macOS **Keychain** and transcripts from `~/.claude`. Nothing leaves your machine except the call to Anthropic's own usage endpoint.
 
-| File | What it is |
+## How do I check my Claude Code usage without opening a dashboard?
+
+Claudius surfaces the same numbers as the in-app `/usage` command, but always-on in your menu bar. Two circles show **% left** for the session (5h) and weekly windows; click for full bars, reset times, and a one-tap refresh. If you prefer the terminal, the bundled `claude-usage` CLI prints the same data:
+
+```sh
+claude-usage            # live view of session / weekly / model limits
+claude-usage check      # prints true/false — are you rate-limited right now?
+claude-usage sessions   # recent sessions + cache warmth
+claude-usage cost --since 1d   # which sessions consumed the most today
+```
+
+## Features
+
+| | |
 |---|---|
-| `ClaudiusApp.swift`, `SessionsFeature.swift` | the SwiftUI menu-bar app |
-| `claude-usage` | Python backend: reads the Keychain token, calls the usage endpoint, parses transcripts. The app shells out to it. |
-| `build.sh` | compiles + ad-hoc-signs the app into `/Applications/Claudius.app` |
-| `make_icon.sh` / `make_icon.swift` | regenerate `AppIcon.icns` |
-| `com.ark.claude-usage.plist` | optional launchd watcher for reset/limit notifications |
+| **Session + weekly gauges** | Remaining %, colour-coded, in the menu bar |
+| **Pace arrow** | Weekly burn rate: ↑ too fast, ↓ behind, hidden when on-track |
+| **Reset countdowns** | Exact time until each window resets |
+| **Per-session consumption** | Model-weighted usage share, filterable by 5h / 1d / 1w / all |
+| **Cache warmth + keep-alive** | Optional, per session; never warms a cold cache |
+| **Limit / reset notifications** | Optional background watcher (launchd) |
+| **CLI included** | `claude-usage` works standalone in scripts and CI |
 
 ## Install
 
-Requires macOS 13+, the Xcode command-line tools (`swiftc`), `python3`, and an
-authenticated Claude Code CLI (that's where the Keychain token comes from).
+Requires macOS 13+, the Xcode command-line tools (`swiftc`), `python3`, and an authenticated Claude Code CLI (that's where the Keychain token comes from).
 
 ```sh
 # 1. Backend CLI
@@ -45,18 +51,25 @@ install -m 0755 claude-usage ~/.local/bin/claude-usage
 ./build.sh
 open /Applications/Claudius.app
 
-# 3. (optional) background notifications on limit reached / reset
+# 3. (optional) notifications on limit reached / reset
 sed "s|__HOME__|$HOME|g" com.ark.claude-usage.plist > ~/Library/LaunchAgents/com.ark.claude-usage.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ark.claude-usage.plist
 ```
 
-The CLI is usable on its own: `claude-usage` (live view), `claude-usage check`
-(true/false), `claude-usage sessions`, `claude-usage cost --since 1d`.
+## How it works
 
-## Notes
+The macOS app (SwiftUI, `MenuBarExtra`) shells out to a small Python backend, `claude-usage`, which:
 
-- The token lives only in the login Keychain, and the app shells out to the `claude`
-  CLI for keep-alive — so this can't be sandboxed for the Mac App Store. Distribute
-  notarized instead.
-- Keep-alive costs real quota (each refresh re-reads the session's context), so it's
-  off by default and refuses cold sessions.
+1. reads the `Claude Code-credentials` OAuth token from your login **Keychain**,
+2. calls Anthropic's usage endpoint (the one behind `/usage`) for session/weekly/model limits, and
+3. parses your local `~/.claude` transcripts for per-session cache warmth and consumption — deduped by message id, so streaming rewrites and resumed sessions aren't double-counted.
+
+Because the token lives only in the Keychain and the app runs the `claude` CLI for keep-alive, it **can't be sandboxed** for the Mac App Store — distribute a notarized build instead.
+
+## Similar tools
+
+Claudius sits alongside other free, open-source usage trackers — [CodexBar](https://github.com/steipete/CodexBar), [ccusage](https://github.com/ryoppippi/ccusage), and [Claude-Code-Usage-Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor). Claudius leans on the native menu-bar gauges plus the per-session consumption and cache view.
+
+## Keywords
+
+Claude Code usage tracker · Claude rate limit menu bar · Claude Max weekly limit macOS · Claude Pro 5-hour session window · Anthropic usage monitor · claude-usage CLI · token quota tracker for macOS.
