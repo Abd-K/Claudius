@@ -687,12 +687,12 @@ struct PopoverView: View {
                 Toggle(isOn: Binding(
                     get: { model.autoAnchor },
                     set: { model.autoAnchor = $0 })) {
-                        Text("Auto-anchor").font(.caption)
+                        Text("Auto-renew 5h limit").font(.caption)
                     }
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .fixedSize()
-                    .help("Keeps your 5-hour windows back-to-back. About a minute after each window resets, Claudius sends one tiny cheapest-model request so the next 5-hour window starts right away, instead of waiting until you next use Claude. Heavy users get more windows per day this way; if you rarely hit the 5-hour cap it does little. Off = a window only starts when you send your next message.")
+                    .help("Your 5-hour usage limit only starts counting once you send a message, then resets 5 hours later. With this on, about a minute after it resets Claudius sends one tiny cheapest-model request so a fresh 5-hour limit begins right away — instead of waiting until you next use Claude. Heavy users get more resets (and so more usage) per day; if you rarely hit the 5-hour limit it does little. Off = your 5-hour limit only starts when you send your next message.")
 
                 Button {
                     model.sendTestRequest()
