@@ -182,7 +182,7 @@ final class UsageModel: ObservableObject {
     @Published var isProbing = false
     @Published var probeResult: String?
     @Published var launchAtLogin = SMAppService.mainApp.status == .enabled
-    @Published var autoAnchor = UserDefaults.standard.bool(forKey: "autoAnchor") {
+    @Published var autoAnchor = (UserDefaults.standard.object(forKey: "autoAnchor") as? Bool) ?? true {
         didSet {
             UserDefaults.standard.set(autoAnchor, forKey: "autoAnchor")
             scheduleAutoAnchor()
@@ -681,7 +681,21 @@ struct PopoverView: View {
 
             Divider()
 
-            HStack(spacing: 14) {
+            // Opening 5-hour windows — the auto toggle + a manual "anchor now",
+            // grouped and clearly labeled so they don't read like the per-session
+            // keep-alive bolts in the Sessions list.
+            HStack(spacing: 8) {
+                Toggle(isOn: Binding(
+                    get: { model.autoAnchor },
+                    set: { model.autoAnchor = $0 })) {
+                        Text("Auto-anchor next 5h window").font(.caption)
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .help("Keeps your 5-hour windows back-to-back. About a minute after each window resets, Claudius sends one tiny cheapest-model request so the next 5-hour window starts right away, instead of waiting until you next use Claude. Heavy users get more windows per day this way; if you rarely hit the 5-hour cap it does little. Off = a window only starts when you send your next message.")
+
+                Spacer()
+
                 Button {
                     model.sendTestRequest()
                 } label: {
@@ -693,17 +707,10 @@ struct PopoverView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(model.isProbing)
-                .help("Fire one tiny request now to open a fresh 5h window")
+                .help("Anchor one now — fire a tiny request to open a fresh 5h window immediately")
+            }
 
-                Toggle(isOn: Binding(
-                    get: { model.autoAnchor },
-                    set: { model.autoAnchor = $0 })) {
-                        Text("Auto")
-                    }
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .help("Auto-open a fresh window ~1 min after each reset")
-
+            HStack(spacing: 14) {
                 Spacer()
 
                 Toggle(isOn: Binding(
