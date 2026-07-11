@@ -46,7 +46,7 @@ install -m 0755 claude-usage ~/.local/bin/claude-usage
 open /Applications/Claudius.app
 
 # 3. (optional) background notifications on limit reached / reset
-cp com.ark.claude-usage.plist ~/Library/LaunchAgents/
+sed "s|__HOME__|$HOME|g" com.ark.claude-usage.plist > ~/Library/LaunchAgents/com.ark.claude-usage.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ark.claude-usage.plist
 ```
 
