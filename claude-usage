@@ -829,7 +829,7 @@ def run_anchor(force, json_out):
         if sess is not None and sess.get("resets_at"):
             rs = parse_iso(sess["resets_at"])
             if rs and (rs - now_utc()).total_seconds() > 0 and (sess.get("percent") or 0) > 0:
-                done("skipped", f"session window already open, {format_reset(sess)}", 3,
+                done("skipped", f"5h limit already running, {format_reset(sess)}", 3,
                      {"session_percent": sess.get("percent")})
         last = state.get("last_anchor_attempt", 0)
         if now_utc().timestamp() - last < ANCHOR_GUARD_SECONDS:
@@ -841,7 +841,7 @@ def run_anchor(force, json_out):
     ok, message = run_claude_probe()
     if not ok:
         done("error", message, 5)
-    done("sent", "session window opened via cheapest-model probe", 0)
+    done("sent", "5h limit renewed via tiny cheapest-model request", 0)
 
 
 def run_notify(raw, token_status, state, threshold):

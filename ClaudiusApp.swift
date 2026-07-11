@@ -485,7 +485,7 @@ final class UsageModel: ObservableObject {
            let status = obj["status"] as? String {
             let msg = obj["message"] as? String ?? status
             switch status {
-            case "sent": return (.sent, "window opened")
+            case "sent": return (.sent, "5h limit renewed")
             case "skipped": return (.skipped, msg)
             default: return (.failed, msg)   // "error" — network/probe/usage failure
             }
