@@ -681,20 +681,18 @@ struct PopoverView: View {
 
             Divider()
 
-            // Opening 5-hour windows — the auto toggle + a manual "anchor now",
-            // grouped and clearly labeled so they don't read like the per-session
-            // keep-alive bolts in the Sessions list.
-            HStack(spacing: 8) {
+            // One aligned row: the 5h-anchor feature (toggle + manual bolt) on the
+            // left, app controls (login, quit) on the right.
+            HStack(spacing: 10) {
                 Toggle(isOn: Binding(
                     get: { model.autoAnchor },
                     set: { model.autoAnchor = $0 })) {
-                        Text("Auto-anchor next 5h window").font(.caption)
+                        Text("Auto-anchor").font(.caption)
                     }
                     .toggleStyle(.switch)
                     .controlSize(.mini)
+                    .fixedSize()
                     .help("Keeps your 5-hour windows back-to-back. About a minute after each window resets, Claudius sends one tiny cheapest-model request so the next 5-hour window starts right away, instead of waiting until you next use Claude. Heavy users get more windows per day this way; if you rarely hit the 5-hour cap it does little. Off = a window only starts when you send your next message.")
-
-                Spacer()
 
                 Button {
                     model.sendTestRequest()
@@ -708,9 +706,7 @@ struct PopoverView: View {
                 .buttonStyle(.borderless)
                 .disabled(model.isProbing)
                 .help("Anchor one now — fire a tiny request to open a fresh 5h window immediately")
-            }
 
-            HStack(spacing: 14) {
                 Spacer()
 
                 Toggle(isOn: Binding(
