@@ -28,6 +28,20 @@ Claudius is a lightweight, open-source **macOS menu bar app** for [Claude Code](
 | **Limit / reset notifications** | Optional background watcher (launchd) |
 | **CLI included** | `claude-usage` works standalone in scripts and CI |
 
+## What everything means
+
+**In the menu bar** — two coloured circles, and sometimes a small arrow:
+
+- **Left circle = your 5-hour limit, right circle = your weekly limit.** The number is how much you have **left**; the colour runs green → yellow → orange → red as it gets low.
+- **The arrow** shows only when your weekly pace is off: **↑** you're burning through it fast, **↓** you're well under. No arrow means you're on track.
+
+**Click the icon** to open the panel:
+
+- **Session / Weekly / Fable bars** — how much of each limit is left, and when it resets.
+- **Sessions** — your recent Claude Code chats. The green bar is *cache warmth*: how much longer that chat will resume quickly (e.g. "~59m left", or "expired"). The **🔥 flame** keeps a chat warm automatically; the **↻** refreshes one right now (uses a little quota).
+- **Show consumption** — which chats have used the most of your allowance, over the last **5h / day / week / all time**.
+- **Auto-refresh 5h limit** — when on, it starts a fresh 5-hour limit the moment your current one resets, so you're not left waiting on it.
+
 ## Install
 
 Requires macOS 13+, the Xcode command-line tools (`swiftc`), `python3`, and an authenticated Claude Code CLI (that's where the Keychain token comes from).
@@ -71,4 +85,4 @@ claude-usage cost --since 1d   # which sessions consumed the most today
 
 ## Keywords
 
-Claude Code usage tracker · Claude rate limit menu bar · Claude Max weekly limit macOS · Claude Pro 5-hour session window · Anthropic usage monitor · claude-usage CLI · token quota tracker for macOS.
+Claude Code usage tracker · Claude rate limit menu bar · Claude Max weekly limit macOS · Claude Pro 5-hour session window · Anthropic usage monitor · claude-usage CLI · token quota tracker for macOS · CodexBar alternative · ccusage alternative · Claude-Code-Usage-Monitor alternative.
