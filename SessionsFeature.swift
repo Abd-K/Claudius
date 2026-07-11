@@ -220,7 +220,7 @@ private struct SessionRow: View {
                       : "Cold — won't refresh; warming a dead cache is a full re-read for nothing")
             }
             WarmthBar(fraction: session.warmFraction, warm: session.isWarm)
-            Text(session.isWarm ? "warm · ~\(session.minutesLeft)m left" : "cold · cache expired")
+            Text(session.isWarm ? "~\(session.minutesLeft)m left" : "expired")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
