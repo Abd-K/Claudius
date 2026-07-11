@@ -200,11 +200,12 @@ private struct SessionRow: View {
                 Text(session.title).fontWeight(.medium).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 4)
                 Button { model.toggleKeepAlive(session.id) } label: {
-                    Image(systemName: keepOn ? "bolt.fill" : "bolt.slash")
-                        .foregroundStyle(keepOn ? Color.accentColor : Color.secondary)
+                    Image(systemName: keepOn ? "flame.fill" : "flame")
+                        .foregroundStyle(keepOn ? Color.orange : Color.secondary)
                 }
                 .buttonStyle(.borderless)
-                .help(keepOn ? "Keep-alive on — auto-refreshes near expiry" : "Keep this session's cache warm")
+                .help(keepOn ? "Keep-warm on — extends this session's cache near expiry (while it's still warm)"
+                             : "Keep this session's cache warm")
                 Button { model.sendKeepAlive(session.id, manual: true) } label: {
                     if model.busyID == session.id {
                         ProgressView().controlSize(.small)
