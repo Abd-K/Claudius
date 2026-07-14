@@ -169,7 +169,7 @@ final class UsageModel: ObservableObject {
                     self.error = nil
                     self.scheduleAutoAnchor()
                 case .failure(let message):
-                    self.error = message
+                    self.error = Self.friendlyError(message)
                 }
             }
         }
@@ -302,6 +302,25 @@ final class UsageModel: ObservableObject {
             self.error = "login item: \(error.localizedDescription)"
         }
         launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+
+    /// Turn a raw CLI error status into a short, human sentence for the popover.
+    private static func friendlyError(_ raw: String) -> String {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        func number(after pattern: String) -> Int? {
+            guard let r = s.range(of: pattern, options: .regularExpression) else { return nil }
+            return Int(s[r].filter(\.isNumber))
+        }
+        if let secs = number(after: #"backing off \d+s"#) {
+            let mins = max(1, Int((Double(secs) / 60).rounded()))
+            return "Rate-limited by Anthropic — retrying in ~\(mins)m"
+        }
+        if s.contains("no_credentials") { return "Not signed in — run `claude` once to authenticate" }
+        if s.contains("stale_token") { return "Session token expired — refreshing…" }
+        if let code = number(after: #"http_error_\d+"#) { return "Anthropic API error (\(code))" }
+        if s.contains("timed out") { return "Request timed out — will retry" }
+        if s.isEmpty { return "Couldn't read usage — will retry" }
+        return s
     }
 
     private static func runCLI() -> FetchResult {

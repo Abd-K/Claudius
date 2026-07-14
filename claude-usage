@@ -39,13 +39,19 @@ STATE_DIR = Path.home() / ".local/state/claude-usage"
 STATE_FILE = STATE_DIR / "state.json"
 CACHE_FILE = STATE_DIR / "usage-cache.json"
 # Serve a fresh-enough cached reading without touching the network — collapses
-# the app + watcher + live-view polls into shared reads.
-CACHE_TTL_SECONDS = 90
+# the app + watcher + live-view polls into shared reads. Matched to the app's
+# 120s poll so at most one network read goes out per interval no matter how many
+# callers fire (relaunch bursts, wake, manual refresh) — this is what keeps us
+# under the endpoint's rate limit.
+CACHE_TTL_SECONDS = 120
 # On a failed read, still show a cache this old (marked stale) rather than blank.
 CACHE_STALE_SECONDS = 45 * 60
-# After a 429, all invocations stop hitting the network for this long so the
-# endpoint can recover; cached data is served in the meantime.
+# After a 429, all invocations stop hitting the network for a while so the
+# endpoint can recover; cached data is served in the meantime. The cooldown grows
+# on each *consecutive* 429 (5 → 10 → 20 → capped) so we don't keep retrying into
+# a still-open rate-limit window; it resets to the base on the first good read.
 BACKOFF_SECONDS = 5 * 60
+BACKOFF_MAX_SECONDS = 30 * 60
 # A probe spends a sliver of real subscription usage, so rate-limit both the
 # token-refresh path and the auto-anchor path.
 REFRESH_GUARD_SECONDS = 30 * 60
@@ -223,13 +229,17 @@ def get_usage(auto_refresh, allow_cache=True):
 
     if raw is not None:
         save_cache(raw)
-        if state.get("backoff_until"):
+        if state.get("backoff_until") or state.get("backoff_count"):
             state["backoff_until"] = 0
+            state["backoff_count"] = 0
             save_state(state)
         return raw, "ok", state
 
     if code == 429:
-        state["backoff_until"] = now_utc().timestamp() + BACKOFF_SECONDS
+        n = int(state.get("backoff_count", 0)) + 1
+        state["backoff_count"] = n
+        delay = min(BACKOFF_MAX_SECONDS, BACKOFF_SECONDS * (2 ** (n - 1)))
+        state["backoff_until"] = now_utc().timestamp() + delay
         save_state(state)
     return stale_or("stale_token" if code == 401 else f"http_error_{code}")
 
