@@ -95,6 +95,15 @@ claude-usage cost --since 1d   # which sessions consumed the most today
 
 </details>
 
+<details>
+<summary><strong>Do I need to log in? How does Claudius authenticate?</strong></summary>
+
+**There's no login, and Claudius never sees your credentials.** It doesn't have an account system. It reads the OAuth token that **Claude Code already stores in your macOS Keychain** when you run `claude` and sign in — so if you can use Claude Code, Claudius works. Nothing is sent anywhere except the call to Anthropic's own usage endpoint.
+
+Claude Code refreshes that token as you use it, so this is normally invisible. If the token ever expires and can't be refreshed, the app says **"Claude Code sign-in expired"** and offers a **Sign in** button that opens Terminal running `claude` — Anthropic's own login flow does the work, and Claudius picks the new token up automatically.
+
+</details>
+
 ## Keywords
 
 Claude Code usage tracker · Claude rate limit menu bar · Claude Max weekly limit macOS · Claude Pro 5-hour session window · Anthropic usage monitor · claude-usage CLI · token quota tracker for macOS · CodexBar alternative · ccusage alternative · Claude-Code-Usage-Monitor alternative.
