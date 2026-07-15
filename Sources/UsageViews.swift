@@ -144,10 +144,12 @@ struct PopoverView: View {
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                     if model.needsSignIn {
-                        Button("Sign in to Claude Code") { model.openSignIn() }
+                        Button("Sign in to the Claude Code CLI") { model.openSignIn() }
                             .controlSize(.small)
-                            .help("Opens Terminal and runs `claude` so you can log in. "
-                                  + "Claudius never sees your credentials.")
+                            .help("Opens Terminal and runs `claude auth login`, then picks up "
+                                  + "the new token automatically. The CLI signs in separately "
+                                  + "from the Claude desktop app, so you can be logged into the "
+                                  + "app and still need this. Claudius never sees your credentials.")
                     }
                 }
             }

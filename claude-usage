@@ -125,6 +125,29 @@ def find_claude_cli():
     return str(fallback) if fallback.exists() else None
 
 
+def auth_status():
+    """Ask the Claude CLI whether we're signed in. Local, instant, and spends no
+    usage — unlike a probe. Returns True/False, or None if we can't tell.
+
+    This is what separates "you're logged out" from "you're rate limited": the
+    usage endpoint reports both as 429, so without this we can't tell them apart.
+    """
+    cli = find_claude_cli()
+    if not cli:
+        return None
+    try:
+        out = subprocess.run([cli, "auth", "status", "--json"],
+                             capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        return bool(json.loads(out.stdout.strip()).get("loggedIn"))
+    except (json.JSONDecodeError, AttributeError):
+        return None
+
+
 def run_claude_probe():
     """One tiny headless call. It counts as normal subscription usage, so it both
     refreshes the Keychain token and opens a 5-hour session window if none is open.
@@ -227,6 +250,10 @@ def get_usage(auto_refresh, allow_cache=True):
     # never look at the token again, every retry would 429, and the cooldown would
     # grow forever. Refreshing is itself guarded to one attempt per 30 min.
     if token_expired(creds):
+        # Signed out? Then this is a login problem, not a usage problem: say so
+        # immediately without a probe, a request, or a cooldown.
+        if auth_status() is False:
+            return stale_or("signin_required")
         if not (auto_refresh and refresh_via_cli(state)):
             return stale_or("signin_required")
         creds = read_keychain_creds() or creds
@@ -262,6 +289,14 @@ def get_usage(auto_refresh, allow_cache=True):
         return raw, "ok", state
 
     if code == 429:
+        # A dead token and genuine rate limiting are both reported as 429. Ask the
+        # CLI which it is, so being logged out never turns into a cooldown that
+        # hides the real problem (it once cost us 16 hours of "rate limited").
+        if auth_status() is False:
+            state["backoff_until"] = 0
+            state["backoff_count"] = 0
+            save_state(state)
+            return stale_or("signin_required")
         n = int(state.get("backoff_count", 0)) + 1
         state["backoff_count"] = n
         # Honour the server's Retry-After when it sends one; only guess otherwise.

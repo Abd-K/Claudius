@@ -23,6 +23,7 @@ final class UsageModel: ObservableObject {
     private let anchorDelayAfterReset: TimeInterval = 60
 
     private var timer: Timer?
+    private var signInWatch: Timer?
     private var anchorTimer: Timer?
     private var anchorRetryTimer: Timer?
     private var anchorRetries = 0
@@ -300,9 +301,13 @@ final class UsageModel: ObservableObject {
         return (.failed, errText.isEmpty ? "request failed (exit \(proc.terminationStatus))" : errText)
     }
 
-    /// Open Claude Code's own login in Terminal. Claudius never handles credentials
-    /// itself — it just launches `claude` and lets Anthropic's flow do the work,
-    /// then picks up the refreshed Keychain token on the next fetch.
+    /// Launch Claude Code's own login. Claudius never handles credentials itself —
+    /// it runs `claude auth login` and lets Anthropic's flow do the work, then
+    /// picks the new Keychain token up automatically.
+    ///
+    /// This goes through a generated .command file because `open -a Terminal <bin>`
+    /// can't pass arguments — and dropping the user into a bare `claude` REPL, left
+    /// to guess that they must type `/login`, is exactly the jarring part.
     func openSignIn() {
         let candidates = [
             NSHomeDirectory() + "/.local/bin/claude",
@@ -315,11 +320,44 @@ final class UsageModel: ObservableObject {
             error = "Can't find the claude CLI — install Claude Code first"
             return
         }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        proc.arguments = ["-a", "Terminal", claude]
-        do { try proc.run() } catch {
-            self.error = "Couldn't open Terminal: \(error.localizedDescription)"
+        let dir = NSHomeDirectory() + "/Library/Application Support/Claudius"
+        let script = dir + "/signin.command"
+        let body = """
+        #!/bin/zsh
+        echo "Signing in to the Claude Code CLI (separate from the desktop app)…"
+        echo
+        "\(claude)" auth login
+        echo
+        echo "All done — close this window and go back to Claudius."
+        """
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try body.write(toFile: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script)
+        } catch {
+            self.error = "Couldn't prepare sign-in: \(error.localizedDescription)"
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: script))
+        watchForSignIn()
+    }
+
+    /// While the login is open, check every few seconds so the app flips back to
+    /// live numbers the moment it succeeds, rather than sitting on a stale error
+    /// for up to a full poll interval. Costs nothing: while signed out the CLI
+    /// answers locally without touching the network.
+    private func watchForSignIn() {
+        signInWatch?.invalidate()
+        var ticks = 0
+        signInWatch = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] t in
+            guard let self else { t.invalidate(); return }
+            ticks += 1
+            if !self.needsSignIn || ticks > 60 {   // resolved, or give up after 5 min
+                t.invalidate()
+                self.signInWatch = nil
+                return
+            }
+            self.fetch()
         }
     }
 
@@ -344,8 +382,9 @@ final class UsageModel: ObservableObject {
             let mins = max(1, Int((Double(secs) / 60).rounded()))
             return "Rate-limited by Anthropic — retrying in ~\(mins)m"
         }
-        if s.contains("no_credentials") { return "Not signed in — run `claude` once to authenticate" }
-        if s.contains("signin_required") { return "Claude Code sign-in expired — run `claude` to log in" }
+        if s.contains("no_credentials") || s.contains("signin_required") {
+            return "Claude Code CLI sign-in needed — separate from the desktop app"
+        }
         if s.contains("stale_token") { return "Session token expired — refreshing…" }
         if let code = number(after: #"http_error_\d+"#) { return "Anthropic API error (\(code))" }
         if s.contains("timed out") { return "Request timed out — will retry" }
