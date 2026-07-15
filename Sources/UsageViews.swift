@@ -83,7 +83,16 @@ struct WindowRow: View {
 
     private var resetText: String {
         guard let d = window.resetDate else { return "" }
-        return Self.human(d.timeIntervalSinceNow)
+        return "\(Self.human(d.timeIntervalSinceNow)) · \(Self.clock(d))"
+    }
+
+    /// The absolute reset moment: clock time if it's within a day ("3:15 PM"),
+    /// otherwise weekday + time ("Sat 8:00 AM") so multi-day windows are unambiguous.
+    static func clock(_ d: Date) -> String {
+        if d.timeIntervalSinceNow < 24 * 3600 {
+            return d.formatted(date: .omitted, time: .shortened)
+        }
+        return d.formatted(.dateTime.weekday(.abbreviated).hour().minute())
     }
 
     static func human(_ interval: TimeInterval) -> String {
@@ -129,9 +138,18 @@ struct PopoverView: View {
             }
 
             if let error = model.error {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if model.needsSignIn {
+                        Button("Sign in to Claude Code") { model.openSignIn() }
+                            .controlSize(.small)
+                            .help("Opens Terminal and runs `claude` so you can log in. "
+                                  + "Claudius never sees your credentials.")
+                    }
+                }
             }
 
             TimelineView(.periodic(from: .now, by: 30)) { _ in

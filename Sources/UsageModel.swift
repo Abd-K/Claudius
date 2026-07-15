@@ -9,6 +9,9 @@ final class UsageModel: ObservableObject {
     @Published var isFetching = false
     @Published var isProbing = false
     @Published var probeResult: String?
+    /// True when the Keychain token is missing or can't be revived — the one case
+    /// that needs a human to log in.
+    @Published var needsSignIn = false
     @Published var launchAtLogin = SMAppService.mainApp.status == .enabled
     @Published var autoAnchor = (UserDefaults.standard.object(forKey: "autoAnchor") as? Bool) ?? true {
         didSet {
@@ -167,9 +170,12 @@ final class UsageModel: ObservableObject {
                     }
                     self.updatedAt = now
                     self.error = nil
+                    self.needsSignIn = false
                     self.scheduleAutoAnchor()
                 case .failure(let message):
                     self.error = Self.friendlyError(message)
+                    self.needsSignIn = message.contains("signin_required")
+                        || message.contains("no_credentials")
                 }
             }
         }
@@ -292,6 +298,29 @@ final class UsageModel: ObservableObject {
         let errText = (String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (.failed, errText.isEmpty ? "request failed (exit \(proc.terminationStatus))" : errText)
+    }
+
+    /// Open Claude Code's own login in Terminal. Claudius never handles credentials
+    /// itself — it just launches `claude` and lets Anthropic's flow do the work,
+    /// then picks up the refreshed Keychain token on the next fetch.
+    func openSignIn() {
+        let candidates = [
+            NSHomeDirectory() + "/.local/bin/claude",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+        ]
+        guard let claude = candidates.first(where: {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }) else {
+            error = "Can't find the claude CLI — install Claude Code first"
+            return
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        proc.arguments = ["-a", "Terminal", claude]
+        do { try proc.run() } catch {
+            self.error = "Couldn't open Terminal: \(error.localizedDescription)"
+        }
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
