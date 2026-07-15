@@ -316,6 +316,7 @@ final class UsageModel: ObservableObject {
             return "Rate-limited by Anthropic — retrying in ~\(mins)m"
         }
         if s.contains("no_credentials") { return "Not signed in — run `claude` once to authenticate" }
+        if s.contains("signin_required") { return "Claude Code sign-in expired — run `claude` to log in" }
         if s.contains("stale_token") { return "Session token expired — refreshing…" }
         if let code = number(after: #"http_error_\d+"#) { return "Anthropic API error (\(code))" }
         if s.contains("timed out") { return "Request timed out — will retry" }

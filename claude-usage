@@ -186,11 +186,17 @@ def fetch_usage(token):
     })
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.load(resp), resp.status
+            return json.load(resp), resp.status, None
     except urllib.error.HTTPError as e:
-        return None, e.code
+        # The server tells us exactly how long to wait; prefer it over guessing.
+        retry_after = None
+        try:
+            retry_after = int(e.headers.get("Retry-After")) if e.headers else None
+        except (TypeError, ValueError):
+            retry_after = None
+        return None, e.code, retry_after
     except Exception:
-        return None, 0
+        return None, 0, None
 
 
 def get_usage(auto_refresh, allow_cache=True):
@@ -212,20 +218,29 @@ def get_usage(auto_refresh, allow_cache=True):
     if allow_cache and cached_raw is not None and age < CACHE_TTL_SECONDS:
         return cached_raw, "cached", state
 
-    # Respect an active backoff after a recent 429.
-    if now_utc().timestamp() < state.get("backoff_until", 0):
-        return stale_or(f"backing off {int(state['backoff_until'] - now_utc().timestamp())}s")
-
     creds = read_keychain_creds()
     if not creds or not creds.get("accessToken"):
         return stale_or("no_credentials")
 
-    if token_expired(creds) and auto_refresh and refresh_via_cli(state):
+    # Check the token BEFORE any backoff short-circuit. The endpoint answers 429
+    # (not 401) for an expired token, so a backoff would otherwise deadlock: we'd
+    # never look at the token again, every retry would 429, and the cooldown would
+    # grow forever. Refreshing is itself guarded to one attempt per 30 min.
+    if token_expired(creds):
+        if not (auto_refresh and refresh_via_cli(state)):
+            return stale_or("signin_required")
         creds = read_keychain_creds() or creds
-    raw, code = fetch_usage(creds["accessToken"])
+        if token_expired(creds):
+            return stale_or("signin_required")   # refresh ran but didn't take
+
+    # Respect an active backoff after a recent 429.
+    if now_utc().timestamp() < state.get("backoff_until", 0):
+        return stale_or(f"backing off {int(state['backoff_until'] - now_utc().timestamp())}s")
+
+    raw, code, retry_after = fetch_usage(creds["accessToken"])
     if raw is None and code == 401 and auto_refresh and refresh_via_cli(state):
         creds = read_keychain_creds() or creds
-        raw, code = fetch_usage(creds["accessToken"])
+        raw, code, retry_after = fetch_usage(creds["accessToken"])
 
     if raw is not None:
         save_cache(raw)
@@ -238,7 +253,8 @@ def get_usage(auto_refresh, allow_cache=True):
     if code == 429:
         n = int(state.get("backoff_count", 0)) + 1
         state["backoff_count"] = n
-        delay = min(BACKOFF_MAX_SECONDS, BACKOFF_SECONDS * (2 ** (n - 1)))
+        # Honour the server's Retry-After when it sends one; only guess otherwise.
+        delay = retry_after or min(BACKOFF_MAX_SECONDS, BACKOFF_SECONDS * (2 ** (n - 1)))
         state["backoff_until"] = now_utc().timestamp() + delay
         save_state(state)
     return stale_or("stale_token" if code == 401 else f"http_error_{code}")
