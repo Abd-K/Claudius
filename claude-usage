@@ -233,6 +233,17 @@ def get_usage(auto_refresh, allow_cache=True):
         if token_expired(creds):
             return stale_or("signin_required")   # refresh ran but didn't take
 
+    # A new token clears any cooldown. The endpoint reports both "you're rate
+    # limited" and "your token is dead" as 429, so a backoff accrued while signed
+    # out is untrustworthy — otherwise a fresh login sits behind a stale cooldown
+    # still being told it's rate limited.
+    exp = creds.get("expiresAt")
+    if exp and exp != state.get("token_exp"):
+        state["token_exp"] = exp
+        state["backoff_until"] = 0
+        state["backoff_count"] = 0
+        save_state(state)
+
     # Respect an active backoff after a recent 429.
     if now_utc().timestamp() < state.get("backoff_until", 0):
         return stale_or(f"backing off {int(state['backoff_until'] - now_utc().timestamp())}s")
