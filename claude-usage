@@ -468,6 +468,37 @@ CLAUDE_SESSIONS = Path.home() / ".claude/sessions"
 CLAUDE_DESKTOP_SESSIONS = Path.home() / "Library/Application Support/Claude/claude-code-sessions"
 
 
+def _bot_tag_title(path):
+    """Headless sherpal bot runs open their prompt with a self-identifying
+    first line ('QUEUE BOT (sherpal) — building: …'). Those sessions have no
+    desktop/CLI title, so derive one from the transcript's first user message.
+    Cheap: reads only the head of the file."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(262144).decode("utf-8", "replace")   # bot prompts are big — first record can exceed 100KB
+    except OSError:
+        return None
+    for line in head.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            o = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if o.get("type") != "user":
+            continue
+        c = (o.get("message") or {}).get("content")
+        if isinstance(c, list):
+            c = next((b.get("text", "") for b in c if isinstance(b, dict)), "")
+        first = (c or "").strip().splitlines()[0] if c else ""
+        import re as _re
+        if _re.match(r"(QUEUE|REFINE|SIDE|RESEARCH) BOT\b", first):
+            return first[:70]
+        return None       # first user message wasn't a bot tag — stop looking
+    return None
+
+
 def _session_titles():
     """Map a CLI sessionId -> the title Claude Code shows for it.
 
@@ -572,12 +603,13 @@ def scan_sessions(max_age_seconds=7200):
             continue
         cwd = meta.get("cwd")
         named = names.get(f.stem)
+        bot_title = _bot_tag_title(f)          # explicit bot tag beats everything
         out.append({
             "session_id": f.stem,
             "age_seconds": int(age),
             "last_active": datetime.fromtimestamp(active, timezone.utc).isoformat(),
-            "name": named[0] if named else None,
-            "name_source": named[1] if named else None,
+            "name": bot_title or (named[0] if named else None),
+            "name_source": "bot-tag" if bot_title else (named[1] if named else None),
             "project": Path(cwd).name if cwd else f.parent.name.split("-")[-1],
             "cwd": cwd,
             "branch": meta.get("gitBranch"),
@@ -658,9 +690,10 @@ def scan_costs(since_seconds):
                 d["out"] += ot
     for sid, d in per_session.items():
         named = names.get(sid)
+        bot_title = next((_bot_tag_title(_f) for _f in CLAUDE_PROJECTS.glob(f"*/{sid}.jsonl")), None)
         out.append({
             "session_id": sid,
-            "name": named[0] if named else None,
+            "name": bot_title or (named[0] if named else None),
             "cost_usd": round(d["cost"], 2),
             "output_tokens": d["out"],
             "model": d["model"],
