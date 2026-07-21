@@ -61,10 +61,30 @@ ANCHOR_GUARD_SECONDS = 30 * 60
 CACHE_WARM_TTL = 60 * 60
 ANCHOR_LOG = STATE_DIR / "anchor.log"
 COST_CACHE = STATE_DIR / "cost-cache.json"
+# Bumped whenever the row layout changes; a mismatch throws the cache away rather
+# than trying to migrate it (it rebuilds from the transcripts in one scan).
+COST_CACHE_VERSION = 4
+# Baseline window for "x typical": long enough that the median is stable, short
+# enough that it tracks how you work now rather than months ago.
+BASELINE_SECONDS = 30 * 86400
+# Probe/no-op sessions cost fractions of a cent. Counting them in the median drags
+# it to ~zero and then every real session reads as a huge multiple of "typical".
+BASELINE_FLOOR_USD = 0.05
+# The weekly budget is derived by dividing spend by the API's utilisation percent,
+# and that percent is a whole number — so at low utilisation the rounding error
+# dominates (2% could be 1.5 or 2.5, a 25% swing). Below this, don't show it.
+WEEKLY_MIN_PERCENT = 15
 # Published $/1M (input, output). Subscription users don't pay these, but the
 # weighting makes per-session consumption comparable across models.
 MODEL_RATES = {"fable": (10.0, 50.0), "opus": (5.0, 25.0),
                "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0)}
+# Cache traffic is billed as a multiple of the model's input rate. Writes cost more
+# the longer they live: 1.25x for the 5-minute cache, 2x for the 1-hour one. Claude
+# Code writes 1h caches almost exclusively, so the transcripts' per-TTL breakdown is
+# worth reading — charging every write at 1.25x understates most of a session.
+CACHE_WRITE_5M = 1.25
+CACHE_WRITE_1H = 2.0
+CACHE_READ = 0.1
 
 
 def _rates_for(model):
@@ -631,75 +651,219 @@ def _parse_since(s):
         return 86400
 
 
-def scan_costs(since_seconds):
-    """Per-session consumption within a time window, deduped by message id.
+def _load_cost_cache():
+    try:
+        d = json.loads(COST_CACHE.read_text())
+    except Exception:
+        d = None
+    if not isinstance(d, dict) or d.get("v") != COST_CACHE_VERSION:
+        d = {"v": COST_CACHE_VERSION}
+    for k in ("sids", "models"):
+        if not isinstance(d.get(k), list):
+            d[k] = []
+    if not isinstance(d.get("files"), dict):
+        d["files"] = {}
+    return d
 
-    Transcripts log each assistant message several times (streaming rewrites),
-    and resumed/forked sessions copy prior history into new files — so summing
-    raw usage lines double- or triple-counts. We key each message by its id and
-    count it once, and filter by the message's own timestamp for the window."""
-    out = []
+
+def _save_cost_cache(cache, live_paths):
+    # Forget transcripts that no longer exist, or the cache grows without bound.
+    # The intern tables stay append-only: row entries hold indexes into them.
+    cache["files"] = {k: v for k, v in cache["files"].items() if k in live_paths}
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = COST_CACHE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache, separators=(",", ":")))
+        tmp.replace(COST_CACHE)   # atomic — an interrupted scan can't leave a torn cache
+    except Exception:
+        pass
+
+
+def _parse_cost_rows(path, sid_id, model_id):
+    """One transcript -> [[msg_id, epoch, sid_idx, cost, out_tokens, model_idx], ...].
+
+    This is the expensive step (parsing ~460MB of JSON), so its result is what the
+    cache stores. Rows stay per-message rather than pre-summed: the window filter
+    and the cross-file dedup both need message-level granularity."""
+    rows = []
+    try:
+        fh = open(path, errors="ignore")
+    except OSError:
+        return rows
+    with fh:
+        for line in fh:
+            if '"usage"' not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            m = o.get("message", {})
+            u = m.get("usage")
+            if not isinstance(u, dict):
+                continue
+            in_rate, out_rate = _rates_for(m.get("model"))
+            it = u.get("input_tokens") or 0
+            ot = u.get("output_tokens") or 0
+            cc = u.get("cache_creation_input_tokens") or 0
+            cr = u.get("cache_read_input_tokens") or 0
+            # Prefer the per-TTL split so 1-hour writes are priced at 2x rather than
+            # 1.25x; older transcripts predate the field, and there the TTL is
+            # unknowable after the fact, so assume the cheaper one.
+            split = u.get("cache_creation")
+            w5 = w1 = 0
+            if isinstance(split, dict):
+                w5 = split.get("ephemeral_5m_input_tokens") or 0
+                w1 = split.get("ephemeral_1h_input_tokens") or 0
+            write = ((w5 * CACHE_WRITE_5M + w1 * CACHE_WRITE_1H) if (w5 or w1)
+                     else cc * CACHE_WRITE_5M) * in_rate
+            cost = (it * in_rate + write + cr * in_rate * CACHE_READ
+                    + ot * out_rate) / 1e6
+            ts = parse_iso(o.get("timestamp"))
+            mid = m.get("id") or None
+            if mid and mid.startswith("msg_"):
+                mid = mid[4:]           # the prefix is on every id; drop it to shrink the cache
+            rows.append([mid, int(ts.timestamp()) if ts else 0,
+                         sid_id(o.get("sessionId") or path.stem),  # credit the owner, not the fork
+                         round(cost, 6), ot, model_id(m.get("model"))])
+    return rows
+
+
+def _cost_rows(cache):
+    """Cached rows for every transcript, re-parsing only files whose (mtime, size)
+    changed. Returns ([(path, rows)], live_path_set) in a stable path order."""
+    def interner(table):
+        index = {s: i for i, s in enumerate(table)}
+
+        def to_id(value):
+            i = index.get(value)
+            if i is None:
+                i = len(table)
+                table.append(value)
+                index[value] = i
+            return i
+        return to_id
+
+    sid_id, model_id = interner(cache["sids"]), interner(cache["models"])
+    live, out = set(), []
+    for f in sorted(CLAUDE_PROJECTS.glob("*/*.jsonl")):
+        key = str(f)
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        live.add(key)
+        sig = f"{int(st.st_mtime)}:{st.st_size}"
+        ent = cache["files"].get(key)
+        if not ent or ent.get("sig") != sig:
+            ent = {"sig": sig,
+                   "r": _parse_cost_rows(f, sid_id, model_id),
+                   "t": _bot_tag_title(f)}   # also content-derived, so the sig covers it
+            cache["files"][key] = ent
+        out.append((f, ent))
+    return out, live
+
+
+def _aggregate(entries, cache, cut):
+    """Per-session totals for messages at or after `cut`, deduped by message id.
+
+    Dedup is global rather than per-file: transcripts log each assistant message
+    several times (streaming rewrites) and resumed/forked sessions copy prior
+    history into a new file, so the same id appears in several places and would
+    otherwise be counted once per copy. An id is marked seen even when it falls
+    outside the window, so a later duplicate inside it can't be counted twice."""
+    sids, models = cache["sids"], cache["models"]
+    seen, per = set(), {}
+    for _f, ent in entries:
+        for mid, ts, si, cost, ot, mi in ent["r"]:
+            if mid is not None:
+                if mid in seen:
+                    continue
+                seen.add(mid)
+            if ts < cut:
+                continue
+            d = per.setdefault(sids[si], {"cost": 0.0, "out": 0, "model": None})
+            d["cost"] += cost
+            d["out"] += ot
+            d["model"] = models[mi] or d["model"]
+    return per
+
+
+def _median(values):
+    values = sorted(values)
+    n = len(values)
+    if not n:
+        return None
+    h = n // 2
+    return values[h] if n % 2 else (values[h - 1] + values[h]) / 2
+
+
+def _weekly_window():
+    """(window_start_epoch, percent) for the live weekly limit, read from the usage
+    cache only — a consumption scan must never spend a rate-limited API call."""
+    raw, fetched_at = load_cache()
+    if not raw or now_utc().timestamp() - fetched_at > CACHE_STALE_SECONDS:
+        return None, None
+    for w in normalize(raw):
+        if w["name"] == "weekly":
+            rs = parse_iso(w.get("resets_at"))
+            # Align to the real window: the reset instant minus the 7-day period.
+            return (rs.timestamp() - 7 * 86400) if rs else None, w.get("percent")
+    return None, None
+
+
+def cost_report(since_seconds):
+    """Per-session consumption plus the two fixed yardsticks the UI ranks against:
+    the median session (`baseline_usd`) and the derived weekly allowance."""
+    empty = {"sessions": [], "total_usd": 0.0, "baseline_usd": None,
+             "weekly_budget_usd": None, "weekly_percent": None}
     if not CLAUDE_PROJECTS.is_dir():
-        return out
+        return empty
+
+    cache = _load_cost_cache()
+    entries, live = _cost_rows(cache)
     now = now_utc().timestamp()
-    cut = (now - since_seconds) if since_seconds else 0.0
-    seen, per_session = set(), {}
+    per = _aggregate(entries, cache, (now - since_seconds) if since_seconds else 0.0)
+
+    # What a session normally costs *you*, so a row can say "2.4x typical" instead
+    # of a share of the window that moves whenever some unrelated session runs.
+    base = _aggregate(entries, cache, now - BASELINE_SECONDS)
+    baseline = _median([d["cost"] for d in base.values()
+                        if d["cost"] >= BASELINE_FLOOR_USD])
+
+    # Derive the weekly allowance instead of hardcoding it: the API says what
+    # percent of the week is gone and we know what those sessions cost, so
+    # spend / percent is the whole allowance. Re-derived on every scan, so a plan
+    # change or a promo needs no code change — the denominator just moves.
+    wcut, wpct = _weekly_window()
+    weekly_budget = None
+    if wcut is not None and wpct is not None and wpct >= WEEKLY_MIN_PERCENT:
+        spent = sum(d["cost"] for d in _aggregate(entries, cache, wcut).values())
+        if spent > 0:
+            weekly_budget = round(spent / (wpct / 100.0), 2)
+
+    _save_cost_cache(cache, live)
+
     names = _session_titles()
-    for f in CLAUDE_PROJECTS.glob("*/*.jsonl"):
-        try:
-            mt = f.stat().st_mtime
-        except OSError:
-            continue
-        if since_seconds and mt < cut:   # untouched within the window => no in-window turns
-            continue
-        try:
-            fh = open(f, errors="ignore")
-        except OSError:
-            continue
-        with fh:
-            for line in fh:
-                if '"usage"' not in line:
-                    continue
-                try:
-                    o = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                m = o.get("message", {})
-                u = m.get("usage")
-                if not isinstance(u, dict):
-                    continue
-                mid = m.get("id")
-                if mid:
-                    if mid in seen:
-                        continue      # already counted this exact message
-                    seen.add(mid)
-                if since_seconds:
-                    ts = parse_iso(o.get("timestamp"))
-                    if ts and ts.timestamp() < cut:
-                        continue
-                in_rate, out_rate = _rates_for(m.get("model"))
-                it = u.get("input_tokens") or 0
-                ot = u.get("output_tokens") or 0
-                cc = u.get("cache_creation_input_tokens") or 0
-                cr = u.get("cache_read_input_tokens") or 0
-                cost = (it * in_rate + cc * in_rate * 1.25
-                        + cr * in_rate * 0.1 + ot * out_rate) / 1e6
-                sid = o.get("sessionId") or f.stem   # credit the owning session, not the fork
-                d = per_session.setdefault(sid, {"cost": 0.0, "out": 0, "model": m.get("model")})
-                d["cost"] += cost
-                d["out"] += ot
-    for sid, d in per_session.items():
+    titles = {f.stem: ent["t"] for f, ent in entries}
+    rows = []
+    for sid, d in per.items():
         named = names.get(sid)
-        bot_title = next((_bot_tag_title(_f) for _f in CLAUDE_PROJECTS.glob(f"*/{sid}.jsonl")), None)
-        out.append({
+        rows.append({
             "session_id": sid,
-            "name": bot_title or (named[0] if named else None),
+            "name": titles.get(sid) or (named[0] if named else None),
             "cost_usd": round(d["cost"], 2),
             "output_tokens": d["out"],
             "model": d["model"],
         })
-    out.sort(key=lambda s: s["cost_usd"], reverse=True)
-    return out
+    rows.sort(key=lambda s: s["cost_usd"], reverse=True)
+    return {
+        "sessions": rows,
+        "total_usd": round(sum(d["cost"] for d in per.values()), 2),
+        "baseline_usd": round(baseline, 4) if baseline else None,
+        "weekly_budget_usd": weekly_budget,
+        "weekly_percent": wpct,
+    }
 
 
 def run_keepalive(session_id, stale_after, json_out):
@@ -794,17 +958,21 @@ def main():
     args = ap.parse_args()
 
     if args.command == "cost":
-        rows = scan_costs(_parse_since(args.since))
-        total = round(sum(r["cost_usd"] for r in rows), 2)
+        rep = cost_report(_parse_since(args.since))
+        rep["since"] = args.since
         if args.json:
-            print(json.dumps({"sessions": rows, "total_usd": total, "since": args.since}))
+            print(json.dumps(rep))
         else:
-            for r in rows[:20]:
+            base, budget = rep["baseline_usd"], rep["weekly_budget_usd"]
+            for r in rep["sessions"][:20]:
                 label = (r["name"] or r["session_id"][:8])[:34]
-                share = (r["cost_usd"] / total * 100) if total else 0
-                print(f"  {share:5.1f}%  {label:<34} {r['output_tokens'] // 1000}k out")
-            print(f"  ── {len(rows)} sessions · since {args.since} "
-                  f"(share of Claude usage, model-weighted)")
+                mult = f"{r['cost_usd'] / base:5.1f}x" if base else "    ?"
+                week = f"{r['cost_usd'] / budget * 100:5.1f}%" if budget else "     ·"
+                print(f"  {mult} {week}  {label:<34} {r['output_tokens'] // 1000}k out")
+            note = f"typical session ${base:.2f}" if base else "no baseline yet"
+            if budget:
+                note += f" · week ~${budget:.0f} at {rep['weekly_percent']}% used"
+            print(f"  ── {len(rep['sessions'])} sessions · since {args.since} · {note}")
         return
 
     if args.command == "anchor":
