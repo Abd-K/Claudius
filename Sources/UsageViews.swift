@@ -82,6 +82,8 @@ struct WindowRow: View {
     }
 
     private var resetText: String {
+        // No open session window — say so instead of a countdown frozen at "0m".
+        if window.sessionIdle { return "idle · resets on use" }
         guard let d = window.resetDate else { return "" }
         return "\(Self.human(d.timeIntervalSinceNow)) · \(Self.clock(d))"
     }

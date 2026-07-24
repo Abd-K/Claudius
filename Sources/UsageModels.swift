@@ -32,12 +32,26 @@ struct UsageWindow: Identifiable {
         return max(0.02, min(1, 1 - reset.timeIntervalSinceNow / duration))
     }
 
+    /// The 5h session window only exists while you're active — it does not reset on a
+    /// fixed clock. When its reset is already at or behind now, no window is open: the
+    /// CLI floors the countdown to 0, which would otherwise render as a reset stuck at
+    /// "0m" for hours. Weekly/model windows reset on a schedule regardless, so they're
+    /// never idle. (resetDate carries `now + resets_in_seconds`, so <= now == lapsed.)
+    var sessionIdle: Bool {
+        guard name == "session" else { return false }
+        guard let reset = resetDate else { return true }
+        return reset.timeIntervalSinceNow <= 0
+    }
+
     /// Urgency (0 green · 1 yellow · 2 orange · 3 red): starts from how much is
     /// left, then adjusts for time-to-reset — eases when reset is imminent (relief
     /// is coming) and escalates when you're on track to run out before it resets.
     var urgencyLevel: Int {
         if blocked { return 3 }
         let q = (left ?? percent.map { 100 - $0 } ?? 100) / 100   // quota-left fraction
+        // No open session window: rank on remaining quota alone — there's no live
+        // window to project a burn rate against, so the time escalation doesn't apply.
+        if sessionIdle { return q < 0.10 ? 3 : (q < 0.25 ? 2 : (q < 0.50 ? 1 : 0)) }
         let elapsed = elapsedFraction
         let t = 1 - elapsed                                        // time-left fraction
         var level = q < 0.10 ? 3 : (q < 0.25 ? 2 : (q < 0.50 ? 1 : 0))   // magnitude base
@@ -69,7 +83,7 @@ struct UsageWindow: Identifiable {
     var paceSpec: (glyph: String, color: Color)? {
         guard let used = percent else { return nil }
         if name == "session" {
-            guard elapsedFraction >= 0.1 else { return nil }   // too early to project
+            guard !sessionIdle, elapsedFraction >= 0.1 else { return nil }   // no window / too early
             let projected = used / elapsedFraction
             if projected >= 100 { return ("↑", .red) }
             if projected >= 80 { return ("↑", .orange) }
