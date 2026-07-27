@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Model
@@ -250,12 +251,30 @@ private struct SessionRow: View {
     }
 }
 
+/// Natural height of the session rows, so the expanded scroll view can be given a
+/// definite height instead of guessing a per-row size (which breaks at larger
+/// accessibility text sizes).
+private struct ListHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct SessionsSection: View {
     @ObservedObject var model: SessionsModel
+    @State private var listHeight: CGFloat = 0
 
-    /// Collapsed height cap; past this the list scrolls rather than growing the popover.
+    /// Rows shown before the list has to be expanded.
     private static let collapsed = 5
-    private static let expandedMaxHeight: CGFloat = 260
+    /// Tallest the expanded list gets before it scrolls instead of growing the popover.
+    /// Scaled to the display: a fixed cap is either too short to reveal anything beyond
+    /// the collapsed five (which reads as the button doing nothing) or tall enough to
+    /// push the popover off a laptop screen.
+    private static var expandedMaxHeight: CGFloat {
+        let usable = NSScreen.main?.visibleFrame.height ?? 800
+        return min(560, max(300, usable * 0.45))
+    }
 
     /// Warm sessions first, the nearest to going cold at the top — those are the only
     /// ones you can still act on, most urgent first. Expired sessions sink below (a
@@ -284,10 +303,20 @@ struct SessionsSection: View {
                 let rows = VStack(spacing: 9) {
                     ForEach(shown) { SessionRow(session: $0, model: model) }
                 }
-                // Only the expanded list scrolls — collapsed is short enough to sit
-                // inline, and a scroll view there would swallow the popover's own scroll.
+                .background(GeometryReader { g in
+                    Color.clear.preference(key: ListHeightKey.self, value: g.size.height)
+                })
+                // Expanded, the list scrolls rather than growing the popover, which has
+                // no scroll view of its own. The frame must be a *definite* height: a
+                // ScrollView has no intrinsic height, so a bare maxHeight collapses it to
+                // nothing and expanding looks like it hid the list. Fall back to the cap
+                // until the first measurement lands.
                 if model.showAllSessions {
-                    ScrollView { rows }.frame(maxHeight: Self.expandedMaxHeight)
+                    ScrollView {
+                        rows.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(height: min(listHeight > 0 ? listHeight : Self.expandedMaxHeight,
+                                       Self.expandedMaxHeight))
                 } else {
                     rows
                 }
@@ -307,6 +336,7 @@ struct SessionsSection: View {
                     .foregroundStyle(.secondary)
                 }
             }
+            .onPreferenceChange(ListHeightKey.self) { listHeight = $0 }
             if let r = model.lastResult {
                 Text(r).font(.caption)
                     .foregroundStyle(r.hasPrefix("sent") || r.hasPrefix("skipped") ? Color.secondary : Color.orange)
