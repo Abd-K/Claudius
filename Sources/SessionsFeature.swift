@@ -69,7 +69,11 @@ final class SessionsModel: ObservableObject {
     @Published var showCosts = false
     @Published var showAllSessions = false
     @Published var costWindow = "1d"
-    private var costsLoading = false
+    /// Drives the placeholder: a scan in progress, a finished scan (which may
+    /// legitimately have found nothing), or one that failed outright.
+    @Published private(set) var costsLoading = false
+    @Published private(set) var costsLoaded = false
+    @Published private(set) var costsFailed = false
 
     private var timer: Timer?
     private static let staleAfter = 3300  // 55 min — fire before the 1-hour cache lapses
@@ -150,21 +154,35 @@ final class SessionsModel: ObservableObject {
         return (try? JSONDecoder().decode(SessionsOutput.self, from: data))?.sessions
     }
 
-    /// Consumption scan — heavier (reads full transcripts, cached), so only run
-    /// it lazily when the user expands the section.
+    /// Consumption scan — heavier than the session list (it reads transcripts, though
+    /// they're cached), so it only runs when the section is open.
+    ///
+    /// One scan at a time. A request arriving mid-scan isn't dropped: the in-flight
+    /// completion compares the window it fetched against the one now selected and
+    /// re-fires if they differ. Dropping it instead left the list cleared by
+    /// `setCostWindow` and never refilled — a permanent "scanning transcripts…".
     func loadCosts() {
         guard !costsLoading else { return }
         costsLoading = true
+        costsFailed = false
         let window = costWindow
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let data = Self.runCLI(["cost", "--json", "--since", window], timeout: 30)
             let out = data.flatMap { try? JSONDecoder().decode(CostOutput.self, from: $0) }
             DispatchQueue.main.async {
-                if let out {
-                    self?.costs = out.sessions
-                    self?.costsTotal = out.total_usd
+                guard let self else { return }
+                self.costsLoading = false
+                guard window == self.costWindow else {
+                    self.loadCosts()   // moved on mid-scan — fetch what's wanted now
+                    return
                 }
-                self?.costsLoading = false
+                guard let out else {
+                    self.costsFailed = true   // don't sit on a spinner that never resolves
+                    return
+                }
+                self.costs = out.sessions
+                self.costsTotal = out.total_usd
+                self.costsLoaded = true
             }
         }
     }
@@ -172,7 +190,7 @@ final class SessionsModel: ObservableObject {
     func setCostWindow(_ w: String) {
         guard w != costWindow else { return }
         costWindow = w
-        costs = []; costsTotal = 0
+        costs = []; costsTotal = 0; costsLoaded = false
         loadCosts()
     }
 
@@ -385,7 +403,12 @@ struct ConsumptionList: View {
             .pickerStyle(.segmented).controlSize(.mini).labelsHidden()
 
             if model.costs.isEmpty {
-                Text("scanning transcripts…").font(.caption).foregroundStyle(.secondary)
+                Text(model.costsLoading ? "scanning transcripts…"
+                     : model.costsFailed ? "couldn't read consumption"
+                     : model.costsLoaded ? "no sessions in this window"
+                     : "scanning transcripts…")
+                    .font(.caption)
+                    .foregroundStyle(model.costsFailed ? Color.orange : Color.secondary)
             } else {
                 let shown = Array(model.costs.prefix(8))
                 let maxCost = shown.map(\.cost_usd).max() ?? 1
