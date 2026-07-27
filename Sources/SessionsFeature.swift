@@ -128,6 +128,10 @@ final class SessionsModel: ObservableObject {
 
     // MARK: CLI plumbing
 
+    /// Carries the child's stdout back from the reader thread. The semaphore the
+    /// caller waits on is the memory barrier.
+    private final class Output { var data = Data() }
+
     private static func runCLI(_ args: [String], timeout: TimeInterval) -> Data? {
         guard FileManager.default.isExecutableFile(atPath: cliPath) else { return nil }
         let proc = Process()
@@ -138,15 +142,30 @@ final class SessionsModel: ObservableObject {
         proc.environment = env
         let out = Pipe()
         proc.standardOutput = out
-        proc.standardError = Pipe()
+        // Never read, so give it somewhere that can't fill up — an undrained pipe
+        // deadlocks the child just as surely as an undrained stdout.
+        proc.standardError = FileHandle.nullDevice
         do { try proc.run() } catch { return nil }
-        let finished = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { proc.waitUntilExit(); finished.signal() }
-        if finished.wait(timeout: .now() + timeout) == .timedOut {
+
+        // Drain stdout WHILE the process runs. Waiting for exit first deadlocks as
+        // soon as output exceeds the pipe buffer: the child blocks writing into a
+        // full pipe, so it never exits and the wait can only ever time out. That is
+        // what hung the 1w (70KB) and all (180KB) consumption scans while the
+        // smaller windows went through untouched.
+        let output = Output()
+        let read = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            output.data = out.fileHandleForReading.readDataToEndOfFile()
+            read.signal()
+        }
+        // The read returns at EOF, which the child reaches by exiting or closing
+        // stdout — so this covers a wedged child too.
+        if read.wait(timeout: .now() + timeout) == .timedOut {
             proc.terminate()
             return nil
         }
-        return out.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        return output.data
     }
 
     private static func runSessions() -> [CacheSession]? {
