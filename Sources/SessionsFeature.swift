@@ -17,12 +17,19 @@ struct CacheSession: Identifiable, Decodable {
     var title: String { name ?? project ?? "session" }
     private enum CodingKeys: String, CodingKey { case session_id, age_seconds, name, project }
 
+    /// Prompt-cache lifetime the keep-alive targets (mirrors CACHE_WARM_TTL in the CLI).
+    static let warmTTL: TimeInterval = 3600
+
     /// Seconds since last activity, advanced live between scans.
-    var currentAge: TimeInterval { Double(age_seconds) + Date().timeIntervalSince(scannedAt) }
+    var currentAge: TimeInterval { age(at: Date()) }
+    /// Age against a caller-supplied instant. Ordering a list needs this rather than
+    /// `currentAge`: that re-reads the clock on every access, so two sessions of equal
+    /// age can compare inconsistently and break the sort's ordering guarantee.
+    func age(at now: Date) -> TimeInterval { Double(age_seconds) + now.timeIntervalSince(scannedAt) }
     /// Remaining fraction of the 1-hour cache window (1 = just used, 0 = expired).
-    var warmFraction: Double { max(0, min(1, 1 - currentAge / 3600)) }
-    var isWarm: Bool { currentAge < 3600 }
-    var minutesLeft: Int { max(0, Int((3600 - currentAge) / 60)) }
+    var warmFraction: Double { max(0, min(1, 1 - currentAge / Self.warmTTL)) }
+    var isWarm: Bool { currentAge < Self.warmTTL }
+    var minutesLeft: Int { max(0, Int((Self.warmTTL - currentAge) / 60)) }
 }
 
 private struct SessionsOutput: Decodable { let sessions: [CacheSession] }
@@ -60,6 +67,7 @@ final class SessionsModel: ObservableObject {
     @Published var costsBaseline: Double?
     @Published var costsWeeklyBudget: Double?
     @Published var showCosts = false
+    @Published var showAllSessions = false
     @Published var costWindow = "1d"
     private var costsLoading = false
 
@@ -245,17 +253,58 @@ private struct SessionRow: View {
 struct SessionsSection: View {
     @ObservedObject var model: SessionsModel
 
+    /// Collapsed height cap; past this the list scrolls rather than growing the popover.
+    private static let collapsed = 5
+    private static let expandedMaxHeight: CGFloat = 260
+
+    /// Warm sessions first, the nearest to going cold at the top — those are the only
+    /// ones you can still act on, most urgent first. Expired sessions sink below (a
+    /// dead cache can't be extended, and the refresh button is disabled for them),
+    /// most recently expired first so the freshest history stays nearest.
+    private func ordered(at now: Date) -> [CacheSession] {
+        model.sessions.sorted { a, b in
+            let (aAge, bAge) = (a.age(at: now), b.age(at: now))
+            let (aWarm, bWarm) = (aAge < CacheSession.warmTTL, bAge < CacheSession.warmTTL)
+            if aWarm != bWarm { return aWarm }
+            return aWarm ? aAge > bAge : aAge < bAge
+        }
+    }
+
     var body: some View {
         if !model.sessions.isEmpty {
             Divider()
             HStack {
                 Text("Sessions").font(.headline)
                 Spacer()
-                Text("cache warmth").font(.caption).foregroundStyle(.secondary)
+                Text("nearest to expiry").font(.caption).foregroundStyle(.secondary)
             }
-            TimelineView(.periodic(from: .now, by: 30)) { _ in
-                VStack(spacing: 9) {
-                    ForEach(model.sessions.prefix(5)) { SessionRow(session: $0, model: model) }
+            TimelineView(.periodic(from: .now, by: 30)) { ctx in
+                let all = ordered(at: ctx.date)
+                let shown = model.showAllSessions ? all : Array(all.prefix(Self.collapsed))
+                let rows = VStack(spacing: 9) {
+                    ForEach(shown) { SessionRow(session: $0, model: model) }
+                }
+                // Only the expanded list scrolls — collapsed is short enough to sit
+                // inline, and a scroll view there would swallow the popover's own scroll.
+                if model.showAllSessions {
+                    ScrollView { rows }.frame(maxHeight: Self.expandedMaxHeight)
+                } else {
+                    rows
+                }
+                if all.count > Self.collapsed {
+                    Button { model.showAllSessions.toggle() } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: model.showAllSessions ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 9))
+                            Text(model.showAllSessions
+                                 ? "Show fewer"
+                                 : "Show all \(all.count) · \(all.count - Self.collapsed) hidden")
+                                .font(.caption)
+                            Spacer()
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
                 }
             }
             if let r = model.lastResult {
