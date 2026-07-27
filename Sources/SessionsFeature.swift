@@ -433,6 +433,12 @@ struct CostRow: View {
     /// Where a session stops being ordinary and is worth your attention.
     private static let notable = 2.0
 
+    /// Compact money — cents stop carrying information once it's past $10, and the
+    /// row has three numbers competing for a 300pt-wide popover.
+    private static func money(_ v: Double) -> String {
+        v >= 10 ? "$\(Int(v.rounded()))" : String(format: "$%.2f", v)
+    }
+
     private var fraction: Double {
         guard let m = multiple, let scale = barMax, scale > 0 else { return fallbackFraction }
         return min(1, m / scale)
@@ -453,6 +459,10 @@ struct CostRow: View {
                     Text(String(format: "%.1f%%", w * 100))
                         .font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 }
+                // Dimmest of the three: it's the underlying value the other two are
+                // derived from, not the thing you scan the list for.
+                Text(Self.money(cost.cost_usd))
+                    .font(.caption).monospacedDigit().foregroundStyle(.tertiary)
             }
             GeometryReader { g in
                 ZStack(alignment: .leading) {
