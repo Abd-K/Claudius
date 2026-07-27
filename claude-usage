@@ -70,16 +70,11 @@ BASELINE_SECONDS = 30 * 86400
 # Probe/no-op sessions cost fractions of a cent. Counting them in the median drags
 # it to ~zero and then every real session reads as a huge multiple of "typical".
 BASELINE_FLOOR_USD = 0.05
-# The weekly budget is derived by dividing spend by the API's utilisation percent.
-# Only trust that division once the week is well underway: the percent is a whole
-# number (so the error is +-0.5/percent), and early on the sample is thin enough that
-# one model-heavy session skews it. Measured: readings at 50% and 79% agreed within
-# 1% of each other, while a reading at 7% came out ~2x higher.
-WEEKLY_CALIBRATE_PERCENT = 30
-# Once calibrated, reuse that figure for the rest of the week and into the start of
-# the next one, so the share stays visible (and stable) instead of vanishing at every
-# weekly reset. Re-derived the moment the new week crosses the threshold again.
-WEEKLY_CALIBRATION_MAX_AGE = 21 * 86400
+# A session's share of the weekly limit is measured in the API's own units rather
+# than inferred from a dollar allowance. Dividing spend by utilisation to get a
+# budget looked reasonable and was badly wrong: a reading at 50% implied ~$1,258/week
+# while one at 7% implied ~$2,277, and a completed week of $2,660 that never hit the
+# cap proved both too low. The ratio below needs no such guess — see _week_shares.
 # Published $/1M (input, output). Subscription users don't pay these, but the
 # weighting makes per-session consumption comparable across models.
 MODEL_RATES = {"fable": (10.0, 50.0), "opus": (5.0, 25.0),
@@ -818,6 +813,26 @@ def _weekly_window():
     return None, None
 
 
+def _week_shares(entries, cache, wcut, wpct):
+    """How many percentage points of the weekly limit each session accounts for.
+
+    Measured as a ratio, not against a derived dollar allowance: the API reports the
+    week is `wpct` percent used, so a session responsible for a tenth of this week's
+    spend accounts for a tenth of that `wpct`. The unknown size of the allowance
+    cancels out, so this holds even though the plan's limit is never published.
+
+    Only spend inside the *current* week counts, whatever window the caller asked
+    for — a session that also ran last week would otherwise be charged against this
+    week's usage. The one error term left is the whole-number `wpct` (+-0.5 point)."""
+    if wcut is None or not wpct:
+        return {}
+    in_week = _aggregate(entries, cache, wcut)
+    total = sum(d["cost"] for d in in_week.values())
+    if total <= 0:
+        return {}
+    return {sid: round(d["cost"] / total * wpct, 2) for sid, d in in_week.items()}
+
+
 def cost_report(since_seconds):
     """Per-session consumption plus the two fixed yardsticks the UI ranks against:
     the median session (`baseline_usd`) and the derived weekly allowance."""
@@ -837,25 +852,8 @@ def cost_report(since_seconds):
     baseline = _median([d["cost"] for d in base.values()
                         if d["cost"] >= BASELINE_FLOOR_USD])
 
-    # Derive the weekly allowance instead of hardcoding it: the API says what percent
-    # of the week is gone and we know what those sessions cost, so spend / percent is
-    # the whole allowance. Re-derived from live readings, so a plan change or a promo
-    # needs no code change — the denominator just moves on its own.
     wcut, wpct = _weekly_window()
-    weekly_budget = None
-    if wcut is not None and wpct is not None and wpct >= WEEKLY_CALIBRATE_PERCENT:
-        spent = sum(d["cost"] for d in _aggregate(entries, cache, wcut).values())
-        if spent > 0:
-            weekly_budget = round(spent / (wpct / 100.0), 2)
-            state = load_state()
-            state["weekly_budget"] = {"usd": weekly_budget, "at": now, "percent": wpct}
-            save_state(state)
-    if weekly_budget is None:
-        # Too early in the week to divide safely — fall back to the last calibration
-        # rather than blanking the column every Monday.
-        cal = load_state().get("weekly_budget") or {}
-        if cal.get("usd") and now - cal.get("at", 0) <= WEEKLY_CALIBRATION_MAX_AGE:
-            weekly_budget = cal["usd"]
+    week_shares = _week_shares(entries, cache, wcut, wpct)
 
     _save_cost_cache(cache, live)
 
@@ -870,13 +868,13 @@ def cost_report(since_seconds):
             "cost_usd": round(d["cost"], 2),
             "output_tokens": d["out"],
             "model": d["model"],
+            "week_percent": week_shares.get(sid),
         })
     rows.sort(key=lambda s: s["cost_usd"], reverse=True)
     return {
         "sessions": rows,
         "total_usd": round(sum(d["cost"] for d in per.values()), 2),
         "baseline_usd": round(baseline, 4) if baseline else None,
-        "weekly_budget_usd": weekly_budget,
         "weekly_percent": wpct,
     }
 
@@ -978,15 +976,16 @@ def main():
         if args.json:
             print(json.dumps(rep))
         else:
-            base, budget = rep["baseline_usd"], rep["weekly_budget_usd"]
+            base = rep["baseline_usd"]
             for r in rep["sessions"][:20]:
                 label = (r["name"] or r["session_id"][:8])[:34]
                 mult = f"{r['cost_usd'] / base:5.1f}x" if base else "    ?"
-                week = f"{r['cost_usd'] / budget * 100:5.1f}%" if budget else "     ·"
+                wk = r.get("week_percent")
+                week = f"{wk:5.1f}% wk" if wk is not None else "        ·"
                 print(f"  {mult} {week}  {label:<34} {r['output_tokens'] // 1000}k out")
             note = f"typical session ${base:.2f}" if base else "no baseline yet"
-            if budget:
-                note += f" · week ~${budget:.0f} at {rep['weekly_percent']}% used"
+            if rep.get("weekly_percent") is not None:
+                note += f" · week {rep['weekly_percent']}% used"
             print(f"  ── {len(rep['sessions'])} sessions · since {args.since} · {note}")
         return
 

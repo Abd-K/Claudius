@@ -42,19 +42,21 @@ struct CostSession: Identifiable, Decodable {
     let session_id: String
     let name: String?
     let cost_usd: Double
+    /// Percentage *points* of the weekly limit this session accounts for (0…100),
+    /// taken from the API's own reported utilisation rather than a guessed dollar
+    /// allowance. nil when the session did no work inside the current week — it
+    /// consumed none of it, however expensive it was at the time.
+    let week_percent: Double?
     var id: String { session_id }
     var title: String { name ?? String(session_id.prefix(8)) }
 }
-/// `baseline_usd` is the median session of the last 30 days; `weekly_budget_usd` is
-/// the allowance the CLI derives from live API utilisation. They're the two fixed
-/// denominators the rows are measured against — fixed meaning they don't move when
-/// some unrelated session runs. Either can be nil: too little history for a median,
-/// or weekly utilisation still too low to divide by without amplifying its rounding.
+/// `baseline_usd` is the median session of the last 30 days — the denominator behind
+/// "× typical". nil when there's too little history to take a median from. The weekly
+/// share is per-session (`week_percent`) rather than a report-wide denominator.
 private struct CostOutput: Decodable {
     let sessions: [CostSession]
     let total_usd: Double
     let baseline_usd: Double?
-    let weekly_budget_usd: Double?
 }
 
 final class SessionsModel: ObservableObject {
@@ -66,7 +68,6 @@ final class SessionsModel: ObservableObject {
     @Published var costs: [CostSession] = []
     @Published var costsTotal: Double = 0
     @Published var costsBaseline: Double?
-    @Published var costsWeeklyBudget: Double?
     @Published var showCosts = false
     @Published var showAllSessions = false
     @Published var costWindow = "1d"
@@ -165,7 +166,6 @@ final class SessionsModel: ObservableObject {
                     self?.costs = out.sessions
                     self?.costsTotal = out.total_usd
                     self?.costsBaseline = out.baseline_usd
-                    self?.costsWeeklyBudget = out.weekly_budget_usd
                 }
                 self?.costsLoading = false
             }
@@ -176,7 +176,7 @@ final class SessionsModel: ObservableObject {
         guard w != costWindow else { return }
         costWindow = w
         costs = []; costsTotal = 0
-        costsBaseline = nil; costsWeeklyBudget = nil
+        costsBaseline = nil
         loadCosts()
     }
 
@@ -379,8 +379,7 @@ struct ConsumptionList: View {
         guard let base = model.costsBaseline else {
             return "ranked by consumption · \(windowLabel)"
         }
-        let week = model.costsWeeklyBudget == nil ? "" : " · % of week"
-        return String(format: "× typical ($%.2f)%@ · %@", base, week, windowLabel)
+        return String(format: "× typical ($%.2f) · %% of weekly limit · %@", base, windowLabel)
     }
 
     var body: some View {
@@ -395,7 +394,6 @@ struct ConsumptionList: View {
                 Text("scanning transcripts…").font(.caption).foregroundStyle(.secondary)
             } else {
                 let baseline = model.costsBaseline
-                let budget = model.costsWeeklyBudget
                 let shown = Array(model.costs.prefix(8))
                 let maxCost = shown.map(\.cost_usd).max() ?? 1
                 // The bar spans the visible rows so it still ranks them (these are the
@@ -410,7 +408,7 @@ struct ConsumptionList: View {
                     ForEach(shown) { c in
                         CostRow(cost: c,
                                 multiple: baseline.flatMap { $0 > 0 ? c.cost_usd / $0 : nil },
-                                weekShare: budget.flatMap { $0 > 0 ? c.cost_usd / $0 : nil },
+                                weekPercent: c.week_percent,
                                 barMax: barMax,
                                 fallbackFraction: maxCost > 0 ? c.cost_usd / maxCost : 0)
                     }
@@ -426,7 +424,7 @@ struct ConsumptionList: View {
 struct CostRow: View {
     let cost: CostSession
     let multiple: Double?         // × the median session; nil until a baseline exists
-    let weekShare: Double?        // 0…1 of the derived weekly allowance
+    let weekPercent: Double?      // percentage points (0…100) of the weekly limit
     let barMax: Double?           // × typical at a full-width bar; nil without a baseline
     let fallbackFraction: Double  // share of the largest row — only without a baseline
 
@@ -455,8 +453,8 @@ struct CostRow: View {
                         .font(.caption).monospacedDigit()
                         .foregroundStyle(m >= Self.notable ? Color.orange : Color.secondary)
                 }
-                if let w = weekShare, w >= 0.001 {
-                    Text(String(format: "%.1f%%", w * 100))
+                if let w = weekPercent, w >= 0.05 {
+                    Text(String(format: "%.1f%% wk", w))
                         .font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 }
                 // Dimmest of the three: it's the underlying value the other two are
