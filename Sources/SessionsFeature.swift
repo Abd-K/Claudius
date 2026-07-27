@@ -50,13 +50,12 @@ struct CostSession: Identifiable, Decodable {
     var id: String { session_id }
     var title: String { name ?? String(session_id.prefix(8)) }
 }
-/// `baseline_usd` is the median session of the last 30 days — the denominator behind
-/// "× typical". nil when there's too little history to take a median from. The weekly
-/// share is per-session (`week_percent`) rather than a report-wide denominator.
+/// The weekly share is per-session (`week_percent`), so there's no report-wide
+/// denominator to carry here. The CLI also emits `baseline_usd` for its own text
+/// output; the app has no use for it and leaves it undecoded.
 private struct CostOutput: Decodable {
     let sessions: [CostSession]
     let total_usd: Double
-    let baseline_usd: Double?
 }
 
 final class SessionsModel: ObservableObject {
@@ -67,7 +66,6 @@ final class SessionsModel: ObservableObject {
     @Published var lastResult: String?
     @Published var costs: [CostSession] = []
     @Published var costsTotal: Double = 0
-    @Published var costsBaseline: Double?
     @Published var showCosts = false
     @Published var showAllSessions = false
     @Published var costWindow = "1d"
@@ -165,7 +163,6 @@ final class SessionsModel: ObservableObject {
                 if let out {
                     self?.costs = out.sessions
                     self?.costsTotal = out.total_usd
-                    self?.costsBaseline = out.baseline_usd
                 }
                 self?.costsLoading = false
             }
@@ -176,7 +173,6 @@ final class SessionsModel: ObservableObject {
         guard w != costWindow else { return }
         costWindow = w
         costs = []; costsTotal = 0
-        costsBaseline = nil
         loadCosts()
     }
 
@@ -375,12 +371,10 @@ struct ConsumptionList: View {
         model.costWindow == "all" ? "all time" : "last " + model.costWindow
     }
 
-    private var caption: String {
-        guard let base = model.costsBaseline else {
-            return "ranked by consumption · \(windowLabel)"
-        }
-        return String(format: "× typical ($%.2f) · %% of weekly limit · %@", base, windowLabel)
-    }
+    /// Two scales, deliberately: the weekly share moves with the plan (promotions,
+    /// tier changes) and answers "what did this cost me now"; the dollar is
+    /// plan-independent and stays comparable across those changes.
+    private var caption: String { "% of weekly limit · API-equivalent cost · \(windowLabel)" }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -393,24 +387,13 @@ struct ConsumptionList: View {
             if model.costs.isEmpty {
                 Text("scanning transcripts…").font(.caption).foregroundStyle(.secondary)
             } else {
-                let baseline = model.costsBaseline
                 let shown = Array(model.costs.prefix(8))
                 let maxCost = shown.map(\.cost_usd).max() ?? 1
-                // The bar spans the visible rows so it still ranks them (these are the
-                // heaviest sessions, so a fixed cap would peg them all full). Meaning
-                // comes from the tick, which sits wherever 1× typical falls on that span
-                // — never below 2×, so a quiet day can't stretch the scale to nothing.
-                let barMax = baseline.flatMap { b -> Double? in
-                    guard b > 0 else { return nil }
-                    return max(2, maxCost / b)
-                }
                 VStack(spacing: 6) {
                     ForEach(shown) { c in
                         CostRow(cost: c,
-                                multiple: baseline.flatMap { $0 > 0 ? c.cost_usd / $0 : nil },
                                 weekPercent: c.week_percent,
-                                barMax: barMax,
-                                fallbackFraction: maxCost > 0 ? c.cost_usd / maxCost : 0)
+                                fraction: maxCost > 0 ? c.cost_usd / maxCost : 0)
                     }
                 }
                 Text(caption)
@@ -423,13 +406,8 @@ struct ConsumptionList: View {
 
 struct CostRow: View {
     let cost: CostSession
-    let multiple: Double?         // × the median session; nil until a baseline exists
-    let weekPercent: Double?      // percentage points (0…100) of the weekly limit
-    let barMax: Double?           // × typical at a full-width bar; nil without a baseline
-    let fallbackFraction: Double  // share of the largest row — only without a baseline
-
-    /// Where a session stops being ordinary and is worth your attention.
-    private static let notable = 2.0
+    let weekPercent: Double?  // percentage points (0…100) of the weekly limit
+    let fraction: Double      // width relative to the heaviest row on screen
 
     /// Compact money — cents stop carrying information once it's past $10, and the
     /// row has three numbers competing for a 300pt-wide popover.
@@ -437,28 +415,17 @@ struct CostRow: View {
         v >= 10 ? "$\(Int(v.rounded()))" : String(format: "$%.2f", v)
     }
 
-    private var fraction: Double {
-        guard let m = multiple, let scale = barMax, scale > 0 else { return fallbackFraction }
-        return min(1, m / scale)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text(cost.title).font(.caption).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 6)
-                if let m = multiple {
-                    // Past 10× the decimal is noise; the point is already made.
-                    Text(m >= 10 ? "\(Int(m.rounded()))×" : String(format: "%.1f×", m))
-                        .font(.caption).monospacedDigit()
-                        .foregroundStyle(m >= Self.notable ? Color.orange : Color.secondary)
-                }
                 if let w = weekPercent, w >= 0.05 {
                     Text(String(format: "%.1f%% wk", w))
                         .font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 }
-                // Dimmest of the three: it's the underlying value the other two are
-                // derived from, not the thing you scan the list for.
+                // Dimmer than the weekly share: it's the stable cross-plan reference,
+                // not the figure that tells you what a session actually cost you today.
                 Text(Self.money(cost.cost_usd))
                     .font(.caption).monospacedDigit().foregroundStyle(.tertiary)
             }
@@ -467,13 +434,6 @@ struct CostRow: View {
                     Capsule().fill(Color.primary.opacity(0.10))
                     Capsule().fill(Color.accentColor.opacity(0.55))
                         .frame(width: max(2, g.size.width * fraction))
-                    if let scale = barMax, scale > 0 {
-                        // The "typical" mark — bars crossing it are the over-consumers,
-                        // readable at a glance without parsing any number.
-                        Rectangle().fill(Color.primary.opacity(0.35))
-                            .frame(width: 1)
-                            .offset(x: g.size.width / scale)
-                    }
                 }
             }
             .frame(height: 4)
