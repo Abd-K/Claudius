@@ -70,10 +70,16 @@ BASELINE_SECONDS = 30 * 86400
 # Probe/no-op sessions cost fractions of a cent. Counting them in the median drags
 # it to ~zero and then every real session reads as a huge multiple of "typical".
 BASELINE_FLOOR_USD = 0.05
-# The weekly budget is derived by dividing spend by the API's utilisation percent,
-# and that percent is a whole number — so at low utilisation the rounding error
-# dominates (2% could be 1.5 or 2.5, a 25% swing). Below this, don't show it.
-WEEKLY_MIN_PERCENT = 15
+# The weekly budget is derived by dividing spend by the API's utilisation percent.
+# Only trust that division once the week is well underway: the percent is a whole
+# number (so the error is +-0.5/percent), and early on the sample is thin enough that
+# one model-heavy session skews it. Measured: readings at 50% and 79% agreed within
+# 1% of each other, while a reading at 7% came out ~2x higher.
+WEEKLY_CALIBRATE_PERCENT = 30
+# Once calibrated, reuse that figure for the rest of the week and into the start of
+# the next one, so the share stays visible (and stable) instead of vanishing at every
+# weekly reset. Re-derived the moment the new week crosses the threshold again.
+WEEKLY_CALIBRATION_MAX_AGE = 21 * 86400
 # Published $/1M (input, output). Subscription users don't pay these, but the
 # weighting makes per-session consumption comparable across models.
 MODEL_RATES = {"fable": (10.0, 50.0), "opus": (5.0, 25.0),
@@ -831,16 +837,25 @@ def cost_report(since_seconds):
     baseline = _median([d["cost"] for d in base.values()
                         if d["cost"] >= BASELINE_FLOOR_USD])
 
-    # Derive the weekly allowance instead of hardcoding it: the API says what
-    # percent of the week is gone and we know what those sessions cost, so
-    # spend / percent is the whole allowance. Re-derived on every scan, so a plan
-    # change or a promo needs no code change — the denominator just moves.
+    # Derive the weekly allowance instead of hardcoding it: the API says what percent
+    # of the week is gone and we know what those sessions cost, so spend / percent is
+    # the whole allowance. Re-derived from live readings, so a plan change or a promo
+    # needs no code change — the denominator just moves on its own.
     wcut, wpct = _weekly_window()
     weekly_budget = None
-    if wcut is not None and wpct is not None and wpct >= WEEKLY_MIN_PERCENT:
+    if wcut is not None and wpct is not None and wpct >= WEEKLY_CALIBRATE_PERCENT:
         spent = sum(d["cost"] for d in _aggregate(entries, cache, wcut).values())
         if spent > 0:
             weekly_budget = round(spent / (wpct / 100.0), 2)
+            state = load_state()
+            state["weekly_budget"] = {"usd": weekly_budget, "at": now, "percent": wpct}
+            save_state(state)
+    if weekly_budget is None:
+        # Too early in the week to divide safely — fall back to the last calibration
+        # rather than blanking the column every Monday.
+        cal = load_state().get("weekly_budget") or {}
+        if cal.get("usd") and now - cal.get("at", 0) <= WEEKLY_CALIBRATION_MAX_AGE:
+            weekly_budget = cal["usd"]
 
     _save_cost_cache(cache, live)
 
