@@ -74,9 +74,23 @@ final class SessionsModel: ObservableObject {
     @Published private(set) var costsLoading = false
     @Published private(set) var costsLoaded = false
     @Published private(set) var costsFailed = false
+    /// Refreshes sent to a session since the user last worked in it. Each one costs
+    /// quota, so a session being kept warm that you've quietly abandoned is worth
+    /// flagging. Deliberately not persisted: a streak describes the current run of
+    /// refreshes, and a relaunch has already interrupted it.
+    @Published private(set) var unusedWarms: [String: Int] = [:]
 
     private var timer: Timer?
+    /// When each session was last warmed, so the next scan can tell our own stub
+    /// apart from the user actually coming back to the session.
+    private var lastWarmedAt: [String: Date] = [:]
     private static let staleAfter = 3300  // 55 min — fire before the 1-hour cache lapses
+    /// Refreshes with no use in between before a session is flagged.
+    static let unusedWarmLimit = 3
+    /// Activity newer than a warm by more than this is the user's, not our stub's.
+    /// The stub lands at or just before the moment we stamp, so the window only has
+    /// to absorb clock skew and the CLI's whole-second ages.
+    private static let warmGrace: TimeInterval = 60
     private static let cliPath = NSHomeDirectory() + "/.local/bin/claude-usage"
 
     init() {
@@ -90,13 +104,42 @@ final class SessionsModel: ObservableObject {
     func toggleKeepAlive(_ id: String) {
         if keepAliveIDs.contains(id) { keepAliveIDs.remove(id) } else { keepAliveIDs.insert(id) }
         UserDefaults.standard.set(Array(keepAliveIDs), forKey: "keepAliveIDs")
+        // Either way the run of refreshes ends here: switching off stops them, and
+        // switching on is a fresh decision to keep this session alive.
+        clearStreak(id)
     }
 
     func refresh() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let list = Self.runSessions()
-            DispatchQueue.main.async { if let list { self?.sessions = list } }
+            DispatchQueue.main.async {
+                guard let self, let list else { return }
+                self.sessions = list
+                self.reconcileStreaks(with: list)
+            }
         }
+    }
+
+    /// A streak ends when the user comes back. Our stub and a real message both
+    /// reset a session's age, so they're told apart by *when*: activity later than
+    /// the warm we sent is the user's. Sessions that have dropped out of the scan
+    /// are forgotten here too, so the two maps can't grow without bound.
+    private func reconcileStreaks(with list: [CacheSession]) {
+        let now = Date()
+        let live = Set(list.map(\.session_id))
+        lastWarmedAt = lastWarmedAt.filter { live.contains($0.key) }
+        let kept = unusedWarms.filter { live.contains($0.key) }
+        if kept != unusedWarms { unusedWarms = kept }  // don't republish an unchanged map
+        for s in list {
+            guard let warmedAt = lastWarmedAt[s.session_id] else { continue }
+            let lastActivity = now.addingTimeInterval(-s.age(at: now))
+            if lastActivity > warmedAt.addingTimeInterval(Self.warmGrace) { clearStreak(s.session_id) }
+        }
+    }
+
+    private func clearStreak(_ id: String) {
+        lastWarmedAt[id] = nil
+        unusedWarms[id] = nil
     }
 
     /// For each keep-alive-enabled session that's near expiry, send a stub. The
@@ -119,9 +162,17 @@ final class SessionsModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let (status, message) = Self.runKeepAlive(id, force: manual)
             DispatchQueue.main.async {
-                self?.busyID = nil
-                self?.lastResult = "\(status): \(message)"
-                self?.refresh()
+                guard let self else { return }
+                self.busyID = nil
+                self.lastResult = "\(status): \(message)"
+                // Only an accepted stub extends the cache, so only that counts as a
+                // refresh the user didn't ask for. A skip, a cold session or a
+                // rejection at the limit spent nothing and touched no cache.
+                if status == "sent" {
+                    self.lastWarmedAt[id] = Date()
+                    self.unusedWarms[id, default: 0] += 1
+                }
+                self.refresh()
             }
         }
     }
@@ -251,6 +302,10 @@ private struct SessionRow: View {
     @ObservedObject var model: SessionsModel
 
     private var keepOn: Bool { model.keepAliveIDs.contains(session.id) }
+    private var warms: Int { model.unusedWarms[session.id] ?? 0 }
+    /// Refreshed repeatedly with no work in between — the session is costing quota
+    /// for nothing, so the card says so in red rather than sitting there quietly.
+    private var abandoned: Bool { warms >= SessionsModel.unusedWarmLimit }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -259,7 +314,7 @@ private struct SessionRow: View {
                 Spacer(minLength: 4)
                 Button { model.toggleKeepAlive(session.id) } label: {
                     Image(systemName: keepOn ? "flame.fill" : "flame")
-                        .foregroundStyle(keepOn ? Color.orange : Color.secondary)
+                        .foregroundStyle(keepOn ? (abandoned ? Color.red : Color.orange) : Color.secondary)
                 }
                 .buttonStyle(.borderless)
                 .help(keepOn ? "Keep-warm on — extends this session's cache near expiry (while it's still warm)"
@@ -278,9 +333,29 @@ private struct SessionRow: View {
                       : "Cold — won't refresh; warming a dead cache is a full re-read for nothing")
             }
             WarmthBar(fraction: session.warmFraction, warm: session.isWarm)
-            Text(session.isWarm ? "~\(session.minutesLeft)m left" : "expired")
-                .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Text(session.isWarm ? "~\(session.minutesLeft)m left" : "expired")
+                    .font(.caption).foregroundStyle(.secondary)
+                if abandoned {
+                    Text("· refreshed \(warms)× unused")
+                        .font(.caption).foregroundStyle(Color.red)
+                        .lineLimit(1).truncationMode(.tail)
+                        .help("Kept warm through \(warms) refreshes since you last worked here — each one spends quota. Turn keep-warm off if you're done with it.")
+                }
+            }
         }
+        // Only the flagged card gets a surround; an untouched row keeps the plain
+        // layout, so the red reads as an exception rather than one card of many.
+        .padding(.horizontal, abandoned ? 7 : 0)
+        .padding(.vertical, abandoned ? 6 : 0)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.red.opacity(abandoned ? 0.10 : 0))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.red.opacity(abandoned ? 0.35 : 0), lineWidth: 1)
+                )
+        )
     }
 }
 
@@ -309,12 +384,17 @@ struct SessionsSection: View {
         return min(560, max(300, usable * 0.45))
     }
 
-    /// Warm sessions first, the nearest to going cold at the top — those are the only
-    /// ones you can still act on, most urgent first. Expired sessions sink below (a
-    /// dead cache can't be extended, and the refresh button is disabled for them),
-    /// most recently expired first so the freshest history stays nearest.
+    /// Kept-warm sessions pin to the top: they're the ones being refreshed on your
+    /// behalf, so what the app is spending quota on stays visible without expanding
+    /// the list. Below them, warm sessions with the nearest to going cold at the top —
+    /// those are the only ones you can still act on, most urgent first. Expired
+    /// sessions sink to the bottom (a dead cache can't be extended, and the refresh
+    /// button is disabled for them), most recently expired first so the freshest
+    /// history stays nearest.
     private func ordered(at now: Date) -> [CacheSession] {
         model.sessions.sorted { a, b in
+            let (aKeep, bKeep) = (model.keepAliveIDs.contains(a.id), model.keepAliveIDs.contains(b.id))
+            if aKeep != bKeep { return aKeep }
             let (aAge, bAge) = (a.age(at: now), b.age(at: now))
             let (aWarm, bWarm) = (aAge < CacheSession.warmTTL, bAge < CacheSession.warmTTL)
             if aWarm != bWarm { return aWarm }
@@ -328,7 +408,9 @@ struct SessionsSection: View {
             HStack {
                 Text("Sessions").font(.headline)
                 Spacer()
-                Text("nearest to expiry").font(.caption).foregroundStyle(.secondary)
+                Text(model.sessions.contains { model.keepAliveIDs.contains($0.id) }
+                     ? "kept warm first" : "nearest to expiry")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             TimelineView(.periodic(from: .now, by: 30)) { ctx in
                 let all = ordered(at: ctx.date)
