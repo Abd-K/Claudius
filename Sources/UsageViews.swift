@@ -112,6 +112,7 @@ struct PopoverView: View {
     @ObservedObject var model: UsageModel
     @ObservedObject var pin: PinController
     @ObservedObject var sessions: SessionsModel
+    @ObservedObject var dock: DockController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -193,6 +194,15 @@ struct PopoverView: View {
                 .help("Anchor one now — fire a tiny request to open a fresh 5h window immediately")
 
                 Spacer()
+
+                Toggle(isOn: Binding(
+                    get: { dock.showInDock },
+                    set: { dock.showInDock = $0 })) {
+                        Image(systemName: "dock.rectangle")
+                    }
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                    .help("Show Claudius in the Dock, with a window you can open from it. Off = menu bar only.")
 
                 Toggle(isOn: Binding(
                     get: { model.launchAtLogin },
