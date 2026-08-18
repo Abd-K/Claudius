@@ -21,6 +21,9 @@ final class UsageModel: ObservableObject {
     }
     /// Seconds after a window's reset to fire the next anchor.
     private let anchorDelayAfterReset: TimeInterval = 60
+    /// Mirrors the CLI's own anchor guard: once it has attempted a probe, no
+    /// further non-forced attempt can do anything for this long.
+    private let anchorGuardSeconds: TimeInterval = 30 * 60
 
     private var timer: Timer?
     private var signInWatch: Timer?
@@ -29,6 +32,9 @@ final class UsageModel: ObservableObject {
     private var anchorRetries = 0
     private let maxAnchorRetries = 6
     private var autoAnchorInFlight = false
+    /// Until this time an attempt could only be refused by the CLI's guard, so
+    /// the 2-minute poll holds off instead of spending a usage read per tick.
+    private var anchorHoldUntil: Date?
     private static let cliPath = NSHomeDirectory() + "/.local/bin/claude-usage"
 
     init() {
@@ -183,22 +189,42 @@ final class UsageModel: ObservableObject {
     }
 
     /// The currently open session window (present with a future reset), or nil.
+    ///
+    /// A future reset is the whole test. There used to be a "nonzero usage" test
+    /// alongside it, which read as a safety net and was in fact the opposite: the
+    /// window a probe opens starts at 0% and stays there for a while, so a freshly
+    /// anchored window looked closed and got anchored again every time the guard
+    /// lifted — six probes across one window instead of one. A lapsed window is
+    /// already excluded by the reset test, since the endpoint keeps reporting the
+    /// old reset time and the CLI floors the countdown to zero once it passes.
     private var openSessionWindow: UsageWindow? {
         guard let s = windows.first(where: { $0.name == "session" }),
-              let reset = s.resetDate, reset.timeIntervalSinceNow > 0,
-              (s.percent ?? 0) > 0 else { return nil }
+              let reset = s.resetDate, reset.timeIntervalSinceNow > 0 else { return nil }
         return s
     }
 
-    /// Schedule the next auto-anchor for 60s after the current window's reset —
-    /// so windows chain back-to-back, anchored to the reset boundary rather than
-    /// to when the toggle was flipped. Reschedules on every fetch as the reset
-    /// time updates. Does nothing if no window is open (nothing to chain from);
-    /// a new window there comes from real use or the Test request button.
+    /// Keep a 5-hour window rolling. While one is open, arm a one-shot timer for
+    /// 60s after its reset so windows chain back-to-back on the reset boundary;
+    /// once one has lapsed, anchor right now — a lapsed window is exactly the
+    /// state this toggle exists to end.
+    ///
+    /// Anchoring out of the lapsed state, and not only from the timer, is what
+    /// keeps the chain alive. This runs on every fetch, and it used to simply
+    /// invalidate the pending timer whenever no window was open. Since the CLI
+    /// floors the countdown to zero the moment a window lapses, any poll landing
+    /// in the 60s before the timer was due killed it, and nothing rearmed it —
+    /// one missed reset ended the chain for good. That same poll is now the
+    /// safety net rather than the thing that breaks it, which also covers a timer
+    /// lost to sleep or to a fetch that failed.
     func scheduleAutoAnchor() {
         anchorTimer?.invalidate()
         anchorTimer = nil
-        guard autoAnchor, let s = openSessionWindow, let reset = s.resetDate else { return }
+        guard autoAnchor else { clearAnchorRetry(); clearAnchorHold(); return }
+        guard let s = openSessionWindow, let reset = s.resetDate else {
+            maybeAutoAnchor()
+            return
+        }
+        clearAnchorHold()
         let fireAt = reset.addingTimeInterval(anchorDelayAfterReset)
         let delay = max(1, fireAt.timeIntervalSinceNow)
         anchorTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
@@ -208,10 +234,14 @@ final class UsageModel: ObservableObject {
 
     /// Fire the anchor probe (non-forced): the CLI re-checks authoritatively and
     /// applies its own 30-min guard, so at most one probe goes out per window.
-    /// On a genuine failure (network/probe) it retries with backoff; a skip or a
-    /// success clears any pending retry.
-    func maybeAutoAnchor() {
+    /// A send parks further attempts for the length of that guard, a guard refusal
+    /// parks them until it expires, and a genuine failure (network/probe) retries
+    /// with backoff.
+    /// `ignoringHold` is for the backoff retry, which owns the hold it is waiting
+    /// out; every other caller must respect it.
+    func maybeAutoAnchor(ignoringHold: Bool = false) {
         guard autoAnchor, !autoAnchorInFlight, !isProbing else { return }
+        if !ignoringHold, let hold = anchorHoldUntil, hold.timeIntervalSinceNow > 0 { return }
         autoAnchorInFlight = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
@@ -222,8 +252,13 @@ final class UsageModel: ObservableObject {
                 case .sent:
                     self.probeResult = "✓ auto: " + message
                     self.clearAnchorRetry()
+                    // The CLI has just stamped its guard, so asking again before
+                    // it lifts can only be refused — and the new window needs a
+                    // moment to show up in the usage endpoint anyway.
+                    self.holdAnchor(for: self.anchorGuardSeconds)
                 case .skipped:
                     self.clearAnchorRetry()
+                    self.applyAnchorHold(from: message)
                 case .failed:
                     self.scheduleAnchorRetry(reason: message)
                 }
@@ -238,16 +273,42 @@ final class UsageModel: ObservableObject {
         anchorRetryTimer = nil
     }
 
+    private func clearAnchorHold() { anchorHoldUntil = nil }
+
+    private func holdAnchor(for seconds: TimeInterval) {
+        anchorHoldUntil = Date().addingTimeInterval(seconds)
+    }
+
+    /// The CLI's guard refusal reads "anchored recently, wait 23m" — park until it
+    /// lifts (plus a minute's slack) so the poll stops re-asking. Any other skip
+    /// means a window is already open, so there is nothing to hold off.
+    private func applyAnchorHold(from message: String) {
+        guard let r = message.range(of: #"wait \d+m"#, options: .regularExpression),
+              let minutes = Int(message[r].filter(\.isNumber)) else {
+            clearAnchorHold()
+            return
+        }
+        holdAnchor(for: Double(minutes + 1) * 60)
+    }
+
     /// Retry a failed anchor with exponential backoff (2, 4, 8, 15, 15… min),
-    /// so a transient network drop doesn't cost you the whole window.
+    /// so a transient network drop doesn't cost you the whole window. The backoff
+    /// is also held on the poll: a failed attempt ends in a fetch, and without the
+    /// hold that fetch would find no open window and attempt again at once.
     private func scheduleAnchorRetry(reason: String) {
         anchorRetryTimer?.invalidate()
-        guard autoAnchor, anchorRetries < maxAnchorRetries else { clearAnchorRetry(); return }
+        guard autoAnchor, anchorRetries < maxAnchorRetries else {
+            clearAnchorRetry()
+            holdAnchor(for: anchorGuardSeconds)   // out of retries: stop hammering
+            probeResult = "auto-refresh gave up (\(reason)) — will try again later"
+            return
+        }
         anchorRetries += 1
         let delay = min(15 * 60, 60 * pow(2, Double(anchorRetries)))
+        holdAnchor(for: delay)
         probeResult = "retrying anchor in \(Int(delay / 60))m (\(reason))"
         anchorRetryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            self?.maybeAutoAnchor()
+            self?.maybeAutoAnchor(ignoringHold: true)
         }
     }
 
@@ -262,6 +323,10 @@ final class UsageModel: ObservableObject {
                 guard let self else { return }
                 self.isProbing = false
                 self.probeResult = (outcome == .sent ? "✓ " : "✗ ") + message
+                // A forced run stamps the CLI's guard whether or not the probe
+                // landed, so auto-anchoring has to wait it out either way.
+                self.clearAnchorRetry()
+                self.holdAnchor(for: self.anchorGuardSeconds)
                 self.fetch()  // reflect the new window immediately
             }
         }
